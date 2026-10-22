@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Production Build Outputs
+dist/
+
+# Local SQLite Databases & WAL logs
+*.db
+*.db-shm
+*.db-wal
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Foundry Artifacts & Caches
+contracts/out/
+contracts/cache/
+
+# Agent, Editor, IDE & System scratch
+.agents/
+.gemini/
+.idea/
+.vscode/
+*.log
+STAGE_*.md
+
+# Vercel & Sensitive Keys
+.vercel/
+*.pem
+*.key
+*.keystore
+
+# OS Metadata
+.DS_Store
+Thumbs.db
