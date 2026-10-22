@@ -474,28 +474,33 @@ function patchProvider(provider: EIP1193Provider | undefined): void {
 }
 
 try {
-  // Case 1: provider already exists
-  const existingProvider = getEthereum();
-  if (existingProvider) {
-    patchProvider(existingProvider);
+  // Only patch if explicitly running inside the Arc Studio IDE iframe
+  // NEVER patch window.ethereum in standalone production (eliminates wallet-drainer heuristics)
+  const isStudioIframe = typeof window !== 'undefined' && window !== window.parent;
+  if (isStudioIframe) {
+    // Case 1: provider already exists
+    const existingProvider = getEthereum();
+    if (existingProvider) {
+      patchProvider(existingProvider);
+    }
+
+    // Case 2: provider set later (wallet extensions inject asynchronously)
+    let _eth: EIP1193Provider | undefined = existingProvider;
+    Object.defineProperty(window, 'ethereum', {
+      configurable: true,
+      enumerable: true,
+      get() { return _eth; },
+      set(v: EIP1193Provider | undefined) {
+        _eth = v;
+        patchProvider(v);
+      },
+    });
+
+    // Case 3: EIP-6963 multi-provider discovery
+    window.addEventListener('eip6963:announceProvider', ((e: EIP6963AnnounceProviderEvent) => {
+      patchProvider(e?.detail?.provider);
+    }));
   }
-
-  // Case 2: provider set later (wallet extensions inject asynchronously)
-  let _eth: EIP1193Provider | undefined = existingProvider;
-  Object.defineProperty(window, 'ethereum', {
-    configurable: true,
-    enumerable: true,
-    get() { return _eth; },
-    set(v: EIP1193Provider | undefined) {
-      _eth = v;
-      patchProvider(v);
-    },
-  });
-
-  // Case 3: EIP-6963 multi-provider discovery
-  window.addEventListener('eip6963:announceProvider', ((e: EIP6963AnnounceProviderEvent) => {
-    patchProvider(e?.detail?.provider);
-  }));
 } catch (e) { log('EIP-1193 patch FAILED', e); }
 
 log('initialized');

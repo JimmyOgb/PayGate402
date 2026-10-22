@@ -50,9 +50,9 @@ type RawServiceTuple = readonly [
 
 export function usePayGateData() {
   const { address, isConnected, chainId } = useAccount()
-  const currentChainId = chainId === ARC_MAINNET_CHAIN_ID ? ARC_MAINNET_CHAIN_ID : ARC_TESTNET_CHAIN_ID
-  const contractConfig = getContractConfig(currentChainId)
-  const publicClient = usePublicClient({ chainId: currentChainId })
+  const currentChainId = ARC_MAINNET_CHAIN_ID
+  const contractConfig = getContractConfig(ARC_MAINNET_CHAIN_ID)
+  const publicClient = usePublicClient({ chainId: ARC_MAINNET_CHAIN_ID })
 
   const [sessionTxs, setSessionTxs] = useState<OnChainActivityItem[]>([])
   const [logItems, setLogItems] = useState<OnChainActivityItem[]>([])
@@ -324,14 +324,18 @@ export function usePayGateData() {
   }, [services, address])
 
   const getServiceMeta = useCallback((service: ServiceData) => {
-    const matchedDemo = DEMO_SERVICES.find(
-      d => d.name.toLowerCase() === service.name.toLowerCase()
-    )
-    const tags = matchedDemo?.tags ?? []
-    const category = matchedDemo?.category ?? inferServiceCategory(service.name, service.endpointDescription, tags)
-    const gatedPayload = service.gatedPayloadPreview || matchedDemo?.gatedPayloadPreview
-    const endpointPath = matchedDemo?.endpointPath ?? `/v1/services/${service.serviceId.toString()}`
-    const httpMethod = matchedDemo?.httpMethod ?? 'POST'
+    const isTelemetry =
+      service.serviceId === 0n ||
+      service.name.toLowerCase().includes('telemetry')
+    const tags = isTelemetry
+      ? ['L1 RPC', 'Live Feed', 'Arc Mainnet']
+      : ['Micropayment', 'HTTP 402']
+    const category = inferServiceCategory(service.name, service.endpointDescription, tags)
+    const gatedPayload = service.gatedPayloadPreview
+    const endpointPath = isTelemetry
+      ? '/v1/telemetry/arc-mainnet'
+      : `/v1/services/${service.serviceId.toString()}`
+    const httpMethod = isTelemetry ? 'GET' : 'POST'
     return { tags, category, gatedPayload, endpointPath, httpMethod }
   }, [])
 
@@ -340,8 +344,8 @@ export function usePayGateData() {
     isConnected: Boolean(isConnected && address),
     chainId,
     currentChainId,
-    isMainnet: currentChainId === ARC_MAINNET_CHAIN_ID,
-    isCorrectChain: chainId === ARC_MAINNET_CHAIN_ID || chainId === ARC_TESTNET_CHAIN_ID,
+    isMainnet: true,
+    isCorrectChain: chainId === ARC_MAINNET_CHAIN_ID,
     services,
     myServices,
     serviceCount,

@@ -77,11 +77,11 @@ export function TransactionsView({
               On-Chain Transactions
             </h1>
             <span className="pg-badge bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 mono">
-              Arc Testnet · 5042002
+              Arc Mainnet · 5042
             </span>
           </div>
           <p className="text-sm text-[#9CA3AF] mt-1">
-            Verifiable event log for <code className="mono text-[#D1D5DB]">{PAYGATE402_ADDRESS}</code>. Every hash links directly to the Arc Testnet block explorer.
+            Verifiable event log for <code className="mono text-[#D1D5DB]">{PAYGATE402_ADDRESS}</code>. Every hash links directly to the Arc block explorer.
           </p>
         </div>
 
@@ -371,11 +371,11 @@ export function TransactionsView({
             <div className="space-y-1">
               <h3 className="text-sm font-semibold text-white">
                 {logsLoading
-                  ? 'Querying recent blocks on Arc Testnet…'
+                  ? 'Querying recent blocks on Arc Mainnet…'
                   : 'No recent service or payment transactions in the queried block window'}
               </h3>
               <p className="text-xs text-[#9CA3AF] max-w-md mx-auto">
-                PayGate402 never fabricates transaction hashes or historical activity. Register an endpoint or unlock an active service on Arc Testnet to record live transactions here.
+                PayGate402 never fabricates transaction hashes or historical activity. Register an endpoint or unlock an active service on Arc Mainnet to record live transactions here.
               </p>
             </div>
             <div className="flex items-center justify-center gap-2.5 pt-1">

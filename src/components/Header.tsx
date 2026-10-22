@@ -51,18 +51,18 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
   const verifiedWallet = Boolean(isConnected && address)
-  const isSupported = isSupportedChain(chainId)
-  const isWrongNetwork = verifiedWallet && !isSupported
-  const currentChainId = chainId === ARC_MAINNET_CHAIN_ID ? ARC_MAINNET_CHAIN_ID : ARC_TESTNET_CHAIN_ID
-  const contractConfig = getContractConfig(currentChainId)
+  const isCorrectChain = chainId === ARC_MAINNET_CHAIN_ID
+  const isWrongNetwork = verifiedWallet && !isCorrectChain
+  const currentChainId = ARC_MAINNET_CHAIN_ID
+  const contractConfig = getContractConfig(ARC_MAINNET_CHAIN_ID)
 
   const { data: usdcBalance } = useReadContract({
     address: USDC_FACT.address as `0x${string}`,
     abi: erc20Abi,
     functionName: 'balanceOf',
     args: verifiedWallet && address ? [address] : undefined,
-    chainId: currentChainId,
-    query: { enabled: verifiedWallet && isSupported },
+    chainId: ARC_MAINNET_CHAIN_ID,
+    query: { enabled: verifiedWallet && isCorrectChain },
   })
 
   const handleNav = (route: AppRoute) => {
@@ -71,31 +71,36 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
   }
 
   return (
-    <header className="sticky top-0 z-50 border-b border-white/[0.08] bg-[#090A0F]/85 backdrop-blur-xl">
+    <header className="sticky top-0 z-50 border-b border-white/10 bg-[#020816]/90 backdrop-blur-[14px]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 gap-4">
           {/* Left: Brand identity + Desktop navigation */}
-          <div className="flex items-center gap-4 min-w-0">
+          <div className="flex items-center gap-6 min-w-0">
             <button
               type="button"
               onClick={() => handleNav('overview')}
               className="flex items-center gap-2.5 text-left group focus:outline-none flex-shrink-0"
+              aria-label="PayGate402 home"
             >
-              <div className="w-8 h-8 rounded-lg bg-[#7C5CFF]/15 border border-[#7C5CFF]/35 flex items-center justify-center shadow-inner group-hover:border-[#7C5CFF]/60 transition-colors">
-                <Shield size={16} className="text-[#A78BFA]" />
+              <div className="w-7 h-7 flex items-center justify-center">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff">
+                  <circle cx="12.2" cy="11.9" r="8.45" strokeWidth="2" />
+                  <path d="M12.2 0.1V24" strokeWidth="1.9" />
+                  <path d="M0 11.9H24.4" strokeWidth="1.95" />
+                </svg>
               </div>
               <div className="flex items-center gap-2">
-                <span className="display text-base font-bold text-white tracking-tight whitespace-nowrap">
-                  PayGate<span className="text-[#A78BFA]">402</span>
+                <span className="font-sans text-lg font-bold text-white tracking-tight whitespace-nowrap">
+                  PayGate<span style={{ color: 'var(--peach)' }}>402</span>
                 </span>
-                <span className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold mono whitespace-nowrap bg-white/[0.06] text-[#9CA3AF] border border-white/[0.08]">
+                <span className="hidden sm:inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono whitespace-nowrap bg-white/10 text-[#cfd3e0] border border-white/10">
                   HTTP 402
                 </span>
               </div>
             </button>
 
             {/* Primary Navigation — Desktop */}
-            <nav aria-label="Main Navigation" className="hidden lg:flex items-center gap-0.5">
+            <nav aria-label="Main Navigation" className="hidden lg:flex items-center gap-1">
               {NAV_ITEMS.map(item => {
                 const Icon = item.icon
                 const isActive = activeRoute === item.id
@@ -105,26 +110,26 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
                     type="button"
                     onClick={() => handleNav(item.id)}
                     aria-current={isActive ? 'page' : undefined}
-                    className={`relative px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 ${
+                    className={`relative px-3 py-2 text-xs font-mono font-medium whitespace-nowrap transition-all flex items-center gap-1.5 ${
                       isActive
-                        ? 'text-white bg-white/[0.07] shadow-sm'
-                        : 'text-[#9CA3AF] hover:text-[#E5E7EB] hover:bg-white/[0.03]'
+                        ? 'text-white bg-white/10'
+                        : 'text-[#989eac] hover:text-white hover:bg-white/[0.04]'
                     }`}
                   >
-                    <Icon size={13} className={`flex-shrink-0 ${isActive ? 'text-[#A78BFA]' : 'text-[#6B7280]'}`} />
+                    <Icon size={13} className={`flex-shrink-0 ${isActive ? 'text-[var(--peach)]' : 'text-[#989eac]'}`} />
                     <span>{item.label}</span>
                     {item.id === 'explore' && serviceCount > 0 && (
-                      <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] mono bg-[#7C5CFF]/20 text-[#A78BFA]">
+                      <span className="ml-1 px-1.5 py-0.2 text-[10px] mono bg-[var(--peach)]/20 text-[var(--peach)]">
                         {serviceCount}
                       </span>
                     )}
                     {item.id === 'my-services' && verifiedWallet && myServiceCount > 0 && (
-                      <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] mono bg-emerald-500/20 text-emerald-300">
+                      <span className="ml-1 px-1.5 py-0.2 text-[10px] mono bg-emerald-500/20 text-emerald-300">
                         {myServiceCount}
                       </span>
                     )}
                     {isActive && (
-                      <span className="absolute inset-x-2.5 -bottom-[15px] h-[2px] rounded-full bg-[#7C5CFF]" />
+                      <span className="absolute inset-x-0 bottom-0 h-[2px] bg-[var(--peach)]" />
                     )}
                   </button>
                 )
@@ -139,14 +144,14 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
               type="button"
               onClick={() => handleNav(activeRoute === 'cli' ? 'overview' : 'cli')}
               aria-current={activeRoute === 'cli' ? 'page' : undefined}
-              className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap mono border transition-all ${
+              className={`hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono whitespace-nowrap border transition-all ${
                 activeRoute === 'cli'
-                  ? 'bg-[#7C5CFF]/20 border-[#7C5CFF]/50 text-[#A78BFA]'
-                  : 'bg-[#121520] border-white/[0.08] text-[#9CA3AF] hover:text-white hover:border-white/[0.16]'
+                  ? 'bg-[var(--peach)]/20 border-[var(--peach)]/50 text-[var(--peach)]'
+                  : 'bg-[#33344a]/60 backdrop-blur-[14px] border-white/10 text-[#cfd3e0] hover:text-white hover:border-white/20'
               }`}
               title="Interactive AI Agent CLI Simulator"
             >
-              <Terminal size={13} className="text-[#A78BFA] flex-shrink-0" />
+              <Terminal size={13} className="text-[var(--peach)] flex-shrink-0" />
               <span>Agent CLI</span>
             </button>
 
@@ -156,74 +161,41 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
                 <button
                   type="button"
                   onClick={() => switchChain({ chainId: ARC_MAINNET_CHAIN_ID })}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/35 text-amber-300 text-xs font-medium whitespace-nowrap hover:bg-amber-500/25 transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-mono font-medium hover:bg-amber-500/30 transition-colors"
                   title="Switch wallet to Arc Mainnet (Chain ID 5042)"
                 >
                   <AlertTriangle size={13} className="text-amber-400 flex-shrink-0" />
-                  <span className="hidden sm:inline">Switch to Mainnet</span>
-                  <span className="sm:hidden">Mainnet</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => switchChain({ chainId: ARC_TESTNET_CHAIN_ID })}
-                  className="hidden md:inline-flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[#9CA3AF] text-xs font-medium whitespace-nowrap hover:bg-white/[0.08] transition-colors"
-                  title="Switch wallet to Arc Testnet (Chain ID 5042002)"
-                >
-                  <span>Testnet</span>
+                  <span className="hidden sm:inline">Switch to Arc Mainnet (5042)</span>
+                  <span className="sm:hidden">Switch to 5042</span>
                 </button>
               </div>
             ) : (
               <div className="flex items-center gap-1.5">
                 <a
-                  href={getContractExplorerUrl(currentChainId)}
+                  href={getContractExplorerUrl(ARC_MAINNET_CHAIN_ID)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#121520] border border-white/[0.08] hover:border-white/[0.16] text-xs text-[#D1D5DB] whitespace-nowrap transition-colors"
-                  title={`View PayGate402 Contract (${contractConfig.contractAddress}) on ${contractConfig.chainName} Explorer`}
+                  className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#33344a]/60 backdrop-blur-[14px] border border-white/10 hover:border-white/20 text-xs text-[#cfd3e0] whitespace-nowrap transition-colors"
+                  title={`View PayGate402 Contract (${contractConfig.contractAddress}) on Arc Mainnet Explorer`}
                 >
-                  <span
-                    className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                      contractConfig.isMainnet ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' : 'bg-[#A78BFA]'
-                    }`}
-                  />
-                  <span className="font-medium">{contractConfig.chainName}</span>
-                  <span className="hidden 2xl:inline text-[#6B7280] mono text-[11px]">{truncAddr(contractConfig.contractAddress)}</span>
-                  <ExternalLink size={11} className="text-[#6B7280] flex-shrink-0" />
+                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]" />
+                  <span className="font-medium font-sans">Arc Mainnet</span>
+                  <span className="hidden 2xl:inline text-[#989eac] mono text-[11px]">{truncAddr(contractConfig.contractAddress)}</span>
+                  <ExternalLink size={11} className="text-[#989eac] flex-shrink-0" />
                 </a>
-
-                {/* Network Switcher Toggle Button */}
-                {verifiedWallet && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      switchChain({
-                        chainId:
-                          currentChainId === ARC_MAINNET_CHAIN_ID
-                            ? ARC_TESTNET_CHAIN_ID
-                            : ARC_MAINNET_CHAIN_ID,
-                      })
-                    }
-                    className="inline-flex items-center px-2 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08] text-[11px] text-[#9CA3AF] hover:text-white transition-colors"
-                    title={`Switch network to ${
-                      currentChainId === ARC_MAINNET_CHAIN_ID ? 'Arc Testnet (5042002)' : 'Arc Mainnet (5042)'
-                    }`}
-                  >
-                    {currentChainId === ARC_MAINNET_CHAIN_ID ? 'Testnet' : 'Mainnet'}
-                  </button>
-                )}
               </div>
             )}
 
             {/* Verified On-Chain USDC Balance */}
             {verifiedWallet && !isWrongNetwork && usdcBalance !== undefined && (
               <div
-                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#121520] border border-white/[0.08]"
-                title="Verified on-chain ERC-20 USDC balance on Arc Testnet"
+                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-[#33344a]/60 backdrop-blur-[14px] border border-white/10"
+                title="Verified on-chain ERC-20 USDC balance on Arc Mainnet"
               >
                 <span className="text-xs font-semibold text-white tabular-nums mono">
                   {formatUsdcAmount(usdcBalance)}
                 </span>
-                <span className="text-[11px] font-medium text-[#9CA3AF] mono">USDC</span>
+                <span className="text-[11px] font-medium text-[#989eac] mono">USDC</span>
               </div>
             )}
 
@@ -235,17 +207,17 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
                   <button
                     type="button"
                     onClick={show}
-                    className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border ${
+                    className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono font-medium transition-all border ${
                       actuallyConnected
-                        ? 'bg-[#151925] border-white/[0.12] text-[#F3F4F6] hover:bg-[#1C2130] hover:border-white/[0.2]'
-                        : 'bg-[#7C5CFF] border-[#7C5CFF] text-white hover:bg-[#8B6EFF] shadow-sm'
+                        ? 'bg-[#33344a]/60 backdrop-blur-[14px] border-white/15 text-white hover:bg-[#424260]/66'
+                        : 'bg-[#f93f28] border-[#f93f28] text-[#331200] hover:brightness-105'
                     }`}
                   >
-                    <Wallet size={13} className={actuallyConnected ? 'text-[#A78BFA]' : 'text-white'} />
-                    <span className={actuallyConnected ? 'mono' : ''}>
+                    <Wallet size={13} className={actuallyConnected ? 'text-[var(--peach)]' : 'text-[#331200]'} />
+                    <span>
                       {actuallyConnected && ckAddr
                         ? `${ckAddr.slice(0, 6)}…${ckAddr.slice(-4)}`
-                        : 'Connect Wallet'}
+                        : 'Connect'}
                     </span>
                   </button>
                 )
@@ -317,15 +289,15 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
           <div className="pt-2 border-t border-white/[0.08] flex items-center justify-between text-xs text-[#9CA3AF]">
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full ${verifiedWallet ? 'bg-emerald-400' : 'bg-[#A78BFA]'}`} />
-              <span>Arc Testnet (5042002)</span>
+              <span>Arc Mainnet (5042)</span>
             </div>
             <a
-              href={getContractExplorerUrl()}
+              href={getContractExplorerUrl(ARC_MAINNET_CHAIN_ID)}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 mono text-[#A78BFA] hover:underline"
             >
-              {truncAddr(PAYGATE402_ADDRESS)}
+              {truncAddr(contractConfig.contractAddress)}
               <ExternalLink size={11} />
             </a>
           </div>

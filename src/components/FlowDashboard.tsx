@@ -31,6 +31,8 @@ import {
   PAYGATE402_ADDRESS,
   USDC_FACT,
   ARC_TESTNET_CHAIN_ID,
+  ARC_MAINNET_CHAIN_ID,
+  getTxExplorerUrl,
   ServiceData,
   truncAddr,
 } from '@/lib/paygate402'
@@ -152,7 +154,10 @@ function syntaxHighlightJson(json: string): string {
 
 export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
   const { address, isConnected, chainId } = useAccount()
-  const publicClient = usePublicClient({ chainId: ARC_TESTNET_CHAIN_ID })
+  const currentChainId = chainId === ARC_TESTNET_CHAIN_ID ? ARC_TESTNET_CHAIN_ID : ARC_MAINNET_CHAIN_ID
+  const isMainnet = currentChainId === ARC_MAINNET_CHAIN_ID
+  const chainName = isMainnet ? 'Arc Mainnet' : 'Arc Testnet'
+  const publicClient = usePublicClient({ chainId: currentChainId })
 
   const [currentScreen, setCurrentScreen] = useState<FlowScreen>('selection')
   const [selectedService, setSelectedService] = useState<SelectedServiceMeta>(DEFAULT_FLOW_SERVICES[0])
@@ -178,7 +183,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
     abi: erc20Abi,
     functionName: 'allowance',
     args: isConnected && address ? [address, PAYGATE402.address] : undefined,
-    chainId: ARC_TESTNET_CHAIN_ID,
+    chainId: currentChainId,
     query: { enabled: Boolean(isConnected && address) },
   })
 
@@ -237,7 +242,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
           abi: PAYGATE402.abi,
           functionName: 'payForAccess',
           args: [BigInt(challenge.serviceId), challenge.requestId],
-          chainId: ARC_TESTNET_CHAIN_ID,
+          chainId: currentChainId,
         })
       })
     }
@@ -367,11 +372,11 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
       return
     }
 
-    // If real wallet connected on Arc Testnet, enforce EOA & live gateway mode before allowing wallet tx
-    if (isConnected && address && chainId === ARC_TESTNET_CHAIN_ID && !isSimulated) {
+    // If real wallet connected on Arc (Mainnet or Testnet), enforce EOA & live gateway mode before allowing wallet tx
+    if (isConnected && address && (chainId === ARC_MAINNET_CHAIN_ID || chainId === ARC_TESTNET_CHAIN_ID) && !isSimulated) {
       if (isMockGateway) {
         const msg =
-          'SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED: Gateway is in Mock RPC mode. Live wallet transactions are blocked to prevent spending real Arc Testnet USDC.'
+          `SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED: Gateway is in Mock RPC mode. Live wallet transactions are blocked to prevent spending real ${chainName} USDC.`
         setConfirmError(msg)
         toast.error(msg)
         return
@@ -404,13 +409,13 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
       const currentAllowance = usdcAllowance ?? 0n
 
       if (currentAllowance < requiredPrice) {
-        toast.info('Approving USDC for PayGate402 on Arc Testnet...')
+        toast.info(`Approving USDC for PayGate402 on ${chainName}...`)
         writeApprove({
           address: USDC_FACT.address as `0x${string}`,
           abi: erc20Abi,
           functionName: 'approve',
           args: [PAYGATE402.address, requiredPrice],
-          chainId: ARC_TESTNET_CHAIN_ID,
+          chainId: currentChainId,
         })
         return
       }
@@ -420,7 +425,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
         abi: PAYGATE402.abi,
         functionName: 'payForAccess',
         args: [BigInt(challenge.serviceId), challenge.requestId],
-        chainId: ARC_TESTNET_CHAIN_ID,
+        chainId: currentChainId,
       })
       return
     }
@@ -470,10 +475,10 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
 
           {/* Network and Wallet Badges */}
           <div className="flex items-center gap-3">
-            {/* Arc Testnet Pill */}
+            {/* Network Pill */}
             <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/[0.05] border border-white/[0.08] text-xs text-gray-300">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Arc Testnet</span>
+              <span>{chainName}</span>
             </div>
 
             {/* Wallet Pill */}
@@ -581,7 +586,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                     </span>
                   </h1>
                   <p className="text-sm text-gray-400 max-w-lg">
-                    Access premium intelligence with secure, per-call payments using PayGate402 on Arc Testnet.
+                    Access premium intelligence with secure, per-call payments using PayGate402 on {chainName}.
                   </p>
                 </div>
 
@@ -667,7 +672,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                             SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED
                           </div>
                           <div className="text-[11px] mt-0.5">
-                            Gateway is running in Mock RPC mode. Live wallet transactions are blocked to prevent spending real Arc Testnet USDC.
+                            Gateway is running in Mock RPC mode. Live wallet transactions are blocked to prevent spending real {chainName} USDC.
                           </div>
                         </div>
                       </div>
@@ -798,11 +803,11 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                   </button>
                 </div>
 
-                {/* Sub Bar: Arc Testnet tag & Account */}
+                {/* Sub Bar: Network tag & Account */}
                 <div className="flex items-center justify-between text-[11px] text-gray-400 px-1">
                   <div className="flex items-center gap-1.5 text-blue-400">
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
-                    <span>Arc Testnet</span>
+                    <span>{chainName}</span>
                   </div>
                   <span className="mono text-gray-300">
                     {isConnected && address ? truncAddr(address) : 'Offline Preview'}
@@ -933,7 +938,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                     <div className="space-y-1">
                       <h2 className="text-lg font-bold text-white">Simulated Payment Confirmation</h2>
                       <p className="text-xs text-gray-400">
-                        This walkthrough demonstrates the HTTP 402 payment flow. No real transaction was submitted on Arc Testnet.
+                        This walkthrough demonstrates the HTTP 402 payment flow. No real transaction was submitted on {chainName}.
                       </p>
                     </div>
 
@@ -985,7 +990,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                       </h2>
                       <p className="text-xs text-gray-400">
                         {isPayConfirming
-                          ? 'Waiting for Arc Testnet block confirmation...'
+                          ? `Waiting for ${chainName} block confirmation...`
                           : 'Sign EIP-712 challenge to authorize and unlock protected data via gateway.'}
                       </p>
                     </div>
@@ -994,7 +999,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                       <div className="flex items-center justify-between">
                         <span className="text-gray-400">Transaction</span>
                         <a
-                          href={`https://explorer.testnet.arc.io/tx/${activeTxHash}`}
+                          href={activeTxHash ? getTxExplorerUrl(activeTxHash, currentChainId) : '#'}
                           target="_blank"
                           rel="noreferrer"
                           className="mono text-blue-400 hover:underline flex items-center gap-1"
@@ -1006,7 +1011,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                       <div className="flex items-center justify-between">
                         <span className="text-gray-400">Status</span>
                         <span className={isPayConfirming ? 'text-amber-400' : 'text-emerald-400 font-medium'}>
-                          {isPayConfirming ? 'Pending Confirmation' : 'Confirmed on Arc Testnet'}
+                          {isPayConfirming ? 'Pending Confirmation' : `Confirmed on ${chainName}`}
                         </span>
                       </div>
                       <div className="flex items-center justify-between">
@@ -1061,7 +1066,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                       </div>
                       <h2 className="text-lg font-bold text-white pt-2">Simulated Demo Preview</h2>
                       <p className="text-xs text-gray-400">
-                        This is a simulated preview. Connect an Arc Testnet wallet and pay on-chain for real gateway verification.
+                        This is a simulated preview. Connect an {chainName} wallet and pay on-chain for real gateway verification.
                       </p>
                     </div>
 
@@ -1089,7 +1094,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
                       </div>
                       <h2 className="text-lg font-bold text-white pt-2">Payment Verified & Authorized</h2>
                       <p className="text-xs text-gray-400">
-                        Your payment was verified on Arc Testnet and authorized by PayGate402 Gateway.
+                        Your payment was verified on {chainName} and authorized by PayGate402 Gateway.
                       </p>
                     </div>
 

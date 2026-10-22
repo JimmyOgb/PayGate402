@@ -109,6 +109,8 @@ export function createGatewayServer(opts: {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Payment-TxHash, X-Payment-RequestId, X-Payment-Signature, X-Payment-Payer',
+      'Access-Control-Allow-Private-Network': 'true',
+      'Access-Control-Expose-Headers': 'WWW-Authenticate, X-Payment-Contract, X-Payment-Token, X-Required-Amount, X-Payment-RequestId, X-Payment-Expires, X-PayGate-Status, X-PayGate-TxHash, X-PayGate-RequestId',
       ...extraHeaders,
     })
     res.end(payload)
@@ -180,6 +182,8 @@ export function createGatewayServer(opts: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Payment-TxHash, X-Payment-RequestId, X-Payment-Signature, X-Payment-Payer',
+        'Access-Control-Allow-Private-Network': 'true',
+        'Access-Control-Expose-Headers': 'WWW-Authenticate, X-Payment-Contract, X-Payment-Token, X-Required-Amount, X-Payment-RequestId, X-Payment-Expires, X-PayGate-Status, X-PayGate-TxHash, X-PayGate-RequestId',
         'Access-Control-Max-Age': '86400',
       })
       res.end()

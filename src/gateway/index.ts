@@ -17,6 +17,7 @@ import {
   ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   ARC_TESTNET_PAYGATE_CONTRACT,
+  ARC_MAINNET_PAYGATE_CONTRACT,
   ARC_TESTNET_RPC,
   ARC_MAINNET_RPC,
   USDC_TOKEN_ADDRESS,
@@ -184,4 +185,9 @@ export function startGateway(customConfig?: Partial<GatewayConfig>) {
       db.close()
     },
   }
+}
+
+// Auto-start gateway if executed directly via Node.js
+if (process.argv[1] && (process.argv[1].endsWith('gateway/index.ts') || process.argv[1].endsWith('gateway\\index.ts'))) {
+  startGateway()
 }

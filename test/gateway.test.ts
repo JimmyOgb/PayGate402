@@ -3515,9 +3515,9 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
     assert.equal(testnet.explorerBase, 'https://explorer.testnet.arc.io')
     assert.equal(testnet.isDeployed, true)
 
-    // 2. Default fallback is Arc Testnet
+    // 2. Default fallback is Arc Mainnet in authoritative production
     const defaultNet = getNetworkConfig(undefined)
-    assert.equal(defaultNet.chainId, 5042002)
+    assert.equal(defaultNet.chainId, 5042)
     assert.equal(defaultNet.isDeployed, true)
 
     // 3. Arc Mainnet (5042) config resolves to deployed PayGate402 v2 contract
@@ -3530,9 +3530,9 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
     assert.equal(mainnet.explorerBase, 'https://explorer.arc.io')
     assert.equal(mainnet.isDeployed, true)
 
-    // 4. Invalid or unknown chain ID falls back safely to default network (Testnet)
+    // 4. Invalid or unknown chain ID falls back safely to authoritative network (Mainnet)
     const unknownNet = getNetworkConfig(999999)
-    assert.equal(unknownNet.chainId, 5042002)
+    assert.equal(unknownNet.chainId, 5042)
     assert.equal(unknownNet.isDeployed, true)
   })
 
@@ -3680,18 +3680,15 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
     assert.ok(usedReqPos !== -1 && transferPos !== -1)
     assert.ok(usedReqPos < transferPos, 'CEI violation: usedRequestIds must update BEFORE external transferFrom')
 
-    // 2. Verify Service Catalog alignment in src/lib/paygate402.ts
+    // 2. Verify Service Catalog alignment: All synthetic/mock services purged for Mainnet
     const catalogPath = join(process.cwd(), 'src', 'lib', 'paygate402.ts')
     const catalogSource = readFileSync(catalogPath, 'utf8')
 
-    // Primary service is Arc L1 Real-Time Telemetry
-    assert.ok(catalogSource.includes('Arc L1 Real-Time Telemetry'))
-    assert.ok(catalogSource.includes('/v1/telemetry/arc-mainnet'))
-
-    // All demo services must be explicitly marked DEMO — SYNTHETIC DATA
-    assert.ok(catalogSource.includes('[DEMO — SYNTHETIC DATA] Whale Accumulation Signals'))
-    assert.ok(catalogSource.includes('[DEMO — SYNTHETIC DATA] DeFi Market Analysis'))
-    assert.ok(catalogSource.includes('[DEMO — SYNTHETIC DATA] Smart Contract Security Audit'))
+    // DEMO_SERVICES must be empty in production — zero synthetic services
+    assert.ok(
+      catalogSource.includes('export const DEMO_SERVICES: DemoServiceTemplate[] = []'),
+      'Production DEMO_SERVICES must be empty to prevent synthetic data injection'
+    )
   })
 
   // ─────────────────────────────────────────────────────────────────────────────

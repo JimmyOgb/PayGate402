@@ -329,7 +329,7 @@ export function MyServices({
             My Services &amp; Provider Portal
           </h1>
           <p className="text-sm text-[#9CA3AF] mt-1">
-            Register HTTP 402 endpoints on Arc Testnet, manage active status, and monitor your 95% USDC revenue share.
+            Register HTTP 402 endpoints on Arc Mainnet, manage active status, and monitor your 95% USDC revenue share.
           </p>
         </div>
 
@@ -621,13 +621,13 @@ export function MyServices({
                     <span>
                       {regWalletPending
                         ? 'Confirm registerService() in Wallet…'
-                        : 'Confirming Registration on Arc Testnet…'}
+                        : 'Confirming Registration on Arc Mainnet…'}
                     </span>
                   </>
                 ) : (
                   <>
                     <Plus size={16} />
-                    <span>Register Endpoint on Arc Testnet</span>
+                    <span>Register Endpoint on Arc Mainnet</span>
                   </>
                 )}
               </button>
@@ -702,7 +702,7 @@ export function MyServices({
                   No endpoints registered by {address ? truncAddr(address) : 'this wallet'}
                 </div>
                 <p className="text-xs text-[#9CA3AF] max-w-xs mx-auto">
-                  Use the registration form to deploy your first HTTP 402 gated service on Arc Testnet.
+                  Use the registration form to deploy your first HTTP 402 gated service on Arc Mainnet.
                 </p>
               </div>
             ) : (

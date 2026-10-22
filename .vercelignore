@@ -1,0 +1,17 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.keystore
+
+# Local databases & WAL files
+*.db
+*.db-shm
+*.db-wal
+
+# Internal audit reports & scratch
+STAGE_*.md
+.agents/
+.gemini/

@@ -214,7 +214,7 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
           abi: PAYGATE402.abi,
           functionName: 'payForAccess',
           args: [BigInt(challenge.serviceId), challenge.requestId],
-          chainId: ARC_TESTNET_CHAIN_ID,
+          chainId: currentChainId,
         })
       })
     }
@@ -228,7 +228,7 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
       void Promise.resolve().then(async () => {
         void refetchAccess()
         addLines(
-          mkLine('[OK] On-chain payment transaction confirmed on Arc Testnet.', 'output'),
+          mkLine('[OK] On-chain payment transaction confirmed on Arc Mainnet.', 'output'),
           mkLine(`[TX] ${payHash}`, 'dim'),
           mkLine(`[>]  Explorer: ${getTxExplorerUrl(payHash)}`, 'dim'),
           mkLine(
@@ -327,7 +327,7 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
         if (!verifiedWallet || !address) {
           addLines(
             mkLine('[STATUS] Wallet: Disconnected (Read-only RPC mode)', 'error'),
-            mkLine(`[CHAIN]  Target: Arc Testnet (Chain ID ${ARC_TESTNET_CHAIN_ID})`, 'dim'),
+            mkLine(`[CHAIN]  Target: Arc Mainnet (Chain ID ${ARC_MAINNET_CHAIN_ID})`, 'dim'),
             mkLine('         Connect your wallet in the top bar to sign transactions.', 'dim')
           )
           return
@@ -335,7 +335,7 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
         addLines(
           mkLine(`[WALLET] ${address}`, 'output'),
           mkLine(
-            `[CHAIN]  ${isCorrectChain ? `Arc Testnet (${ARC_TESTNET_CHAIN_ID}) — Verified` : `Chain ID ${chainId} (Switch to ${ARC_TESTNET_CHAIN_ID})`}`,
+            `[CHAIN]  ${isCorrectChain ? `Arc Mainnet (${ARC_MAINNET_CHAIN_ID}) — Verified` : `Chain ID ${chainId} (Switch to ${ARC_MAINNET_CHAIN_ID})`}`,
             isCorrectChain ? 'success' : 'error'
           ),
           mkLine(
@@ -608,9 +608,9 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
           />
           <span className="text-xs font-medium mono text-[#D1D5DB]">
             {verifiedWallet && isCorrectChain
-              ? 'Wallet Connected · Arc Testnet'
+              ? 'Wallet Connected · Arc Mainnet'
               : verifiedWallet
-                ? 'Wrong Network · Switch to Arc Testnet'
+                ? 'Wrong Network · Switch to Arc Mainnet'
                 : 'Wallet Disconnected · Read-Only RPC'}
           </span>
         </div>
@@ -629,9 +629,9 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/70" />
           </div>
           <div className="text-[11px] text-[#9CA3AF] mono">
-            paygate402-agent-cli — rpc.testnet.arc.io
+            paygate402-agent-cli — rpc.mainnet.arc.io
           </div>
-          <div className="text-[11px] text-[#6B7280] mono">5042002</div>
+          <div className="text-[11px] text-[#6B7280] mono">5042</div>
         </div>
 
         {/* Output Area */}
@@ -654,10 +654,10 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
                 {approvePending
                   ? 'Waiting for wallet approval signature…'
                   : approveConfirming
-                    ? 'Confirming USDC approval on Arc Testnet…'
+                    ? 'Confirming USDC approval on Arc Mainnet…'
                     : payPending
                       ? 'Waiting for payForAccess() signature…'
-                      : 'Confirming 95/5 settlement on Arc Testnet…'}
+                      : 'Confirming 95/5 settlement on Arc Mainnet…'}
               </span>
             </div>
           )}

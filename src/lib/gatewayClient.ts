@@ -15,8 +15,8 @@ export const GATEWAY_BASE_URL =
 export const PAYGATE_EIP712_DOMAIN = {
   name: 'PayGate402 Gateway',
   version: '1',
-  chainId: 5042002,
-  verifyingContract: '0xcc69506b784dffda4ee4d221b122303304099971',
+  chainId: 5042,
+  verifyingContract: '0xa27e390CC82793911D805D4cB3E0c50F2117C77A',
 } as const
 
 export const PAYGATE_EIP712_TYPES = {

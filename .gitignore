@@ -36,3 +36,7 @@ STAGE_*.md
 # OS Metadata
 .DS_Store
 Thumbs.db
+
+# Reference-only spec files
+meridian-reference.html
+public/

@@ -1,5 +1,7 @@
 import { Component, ErrorInfo, ReactNode, useState, useEffect, useCallback } from 'react'
 import { ExternalLink, Shield, AlertTriangle } from 'lucide-react'
+import { useAccount, useReadContract } from 'wagmi'
+import { erc20Abi } from 'viem'
 import { Header, AppRoute } from '@/components/Header'
 import { Overview } from '@/components/Overview'
 import { Marketplace } from '@/components/Marketplace'
@@ -9,6 +11,7 @@ import { DeveloperDocs } from '@/components/DeveloperDocs'
 import { AgentCLI } from '@/components/AgentCLI'
 import { usePayGateData } from '@/lib/usePayGateData'
 import {
+  ARC_MAINNET_CHAIN_ID,
   USDC_FACT,
   getContractConfig,
   getContractExplorerUrl,
@@ -101,6 +104,30 @@ export default function App() {
     recordSessionTx,
   } = usePayGateData()
 
+  const { data: usdcBalance } = useReadContract({
+    address: USDC_FACT.address as `0x${string}`,
+    abi: erc20Abi,
+    functionName: 'balanceOf',
+    args: isConnected && address ? [address] : undefined,
+    chainId: ARC_MAINNET_CHAIN_ID,
+    query: { enabled: Boolean(isConnected && address) },
+  })
+
+  const [scrolledPastHero, setScrolledPastHero] = useState(false)
+
+  useEffect(() => {
+    if (activeRoute !== 'overview') {
+      setScrolledPastHero(true)
+      return
+    }
+    const onScroll = () => {
+      setScrolledPastHero(window.scrollY > 400)
+    }
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [activeRoute])
+
   const handleNavigate = useCallback((route: AppRoute) => {
     setActiveRoute(route)
     if (typeof window !== 'undefined') {
@@ -119,15 +146,18 @@ export default function App() {
 
   return (
     <AppErrorBoundary>
-      <div className="min-h-dvh flex flex-col bg-[#090A0F] text-[#F3F4F6]">
-        <Header
-          activeRoute={activeRoute}
-          onNavigate={handleNavigate}
-          serviceCount={serviceCount}
-          myServiceCount={myServices.length}
-        />
+      <div className="min-h-dvh flex flex-col bg-[#020816] text-[#F6F8FC]">
+        {/* Sticky Header: Present on secondary routes and when scrolled down on Overview */}
+        {(activeRoute !== 'overview' || scrolledPastHero) && (
+          <Header
+            activeRoute={activeRoute}
+            onNavigate={handleNavigate}
+            serviceCount={serviceCount}
+            myServiceCount={myServices.length}
+          />
+        )}
 
-        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <main className="flex-1 w-full">
           {activeRoute === 'overview' && (
             <Overview
               isConnected={isConnected}
@@ -139,87 +169,94 @@ export default function App() {
               metrics={metrics}
               onNavigate={handleNavigate}
               onRefresh={refetchAll}
+              serviceCount={serviceCount}
+              myServiceCount={myServices.length}
+              usdcBalance={usdcBalance}
             />
           )}
 
-          {activeRoute === 'explore' && (
-            <Marketplace
-              services={services}
-              isLoading={isLoading}
-              isError={isError}
-              onRefresh={refetchAll}
-              onNavigate={handleNavigate}
-              onRecordTx={recordSessionTx}
-            />
-          )}
+          {activeRoute !== 'overview' && (
+            <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+              {activeRoute === 'explore' && (
+                <Marketplace
+                  services={services}
+                  isLoading={isLoading}
+                  isError={isError}
+                  onRefresh={refetchAll}
+                  onNavigate={handleNavigate}
+                  onRecordTx={recordSessionTx}
+                />
+              )}
 
-          {activeRoute === 'my-services' && (
-            <MyServices
-              services={services}
-              myServices={myServices}
-              activities={activities}
-              isLoading={isLoading}
-              metrics={metrics}
-              onRefresh={refetchAll}
-              onRecordTx={recordSessionTx}
-            />
-          )}
+              {activeRoute === 'my-services' && (
+                <MyServices
+                  services={services}
+                  myServices={myServices}
+                  activities={activities}
+                  isLoading={isLoading}
+                  metrics={metrics}
+                  onRefresh={refetchAll}
+                  onRecordTx={recordSessionTx}
+                />
+              )}
 
-          {activeRoute === 'transactions' && (
-            <TransactionsView
-              activities={activities}
-              logsLoading={logsLoading}
-              logsError={logsError}
-              onRefresh={refetchAll}
-              onNavigate={handleNavigate}
-            />
-          )}
+              {activeRoute === 'transactions' && (
+                <TransactionsView
+                  activities={activities}
+                  logsLoading={logsLoading}
+                  logsError={logsError}
+                  onRefresh={refetchAll}
+                  onNavigate={handleNavigate}
+                />
+              )}
 
-          {activeRoute === 'docs' && <DeveloperDocs onNavigate={handleNavigate} />}
+              {activeRoute === 'docs' && <DeveloperDocs onNavigate={handleNavigate} />}
 
-          {activeRoute === 'cli' && (
-            <AgentCLI services={services} onNavigate={handleNavigate} />
+              {activeRoute === 'cli' && (
+                <AgentCLI services={services} onNavigate={handleNavigate} />
+              )}
+            </div>
           )}
         </main>
 
         {/* Footer */}
-        <footer className="border-t border-white/[0.07] bg-[#07080D] mt-16">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-[#6B7280]">
+        <footer className="border-t border-white/10 bg-[#070B16] mt-16">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-[#989eac]">
             <div className="flex items-center gap-2.5">
-              <div className="w-6 h-6 rounded-md bg-[#7C5CFF]/15 border border-[#7C5CFF]/30 flex items-center justify-center">
-                <Shield size={12} className="text-[#A78BFA]" />
+              <div className="w-6 h-6 bg-[var(--peach)]/10 border border-[var(--peach)]/30 flex items-center justify-center">
+                <Shield size={12} className="text-[var(--peach)]" />
               </div>
-              <span className="font-semibold text-[#D1D5DB]">PayGate402</span>
+              <span className="font-semibold text-white">PayGate402</span>
               <span>·</span>
-              <span>HTTP 402 Micropayment Gateway on Arc ({getContractConfig(currentChainId).chainName} {currentChainId})</span>
+              <span>HTTP 402 Micropayment Gateway on Arc Mainnet (5042)</span>
             </div>
 
             <div className="flex flex-wrap items-center gap-4 mono text-[11px]">
               <a
-                href={getContractExplorerUrl(currentChainId)}
+                href={getContractExplorerUrl(ARC_MAINNET_CHAIN_ID)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-[#9CA3AF] hover:text-white inline-flex items-center gap-1"
+                className="text-[#cfd3e0] hover:text-white inline-flex items-center gap-1"
               >
-                Contract: {truncAddr(getContractConfig(currentChainId).contractAddress)}
+                Contract: {truncAddr(getContractConfig(ARC_MAINNET_CHAIN_ID).contractAddress)}
                 <ExternalLink size={10} />
               </a>
               <a
-                href={getAddressExplorerUrl(USDC_FACT.address, currentChainId)}
+                href={getAddressExplorerUrl(USDC_FACT.address, ARC_MAINNET_CHAIN_ID)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-[#9CA3AF] hover:text-white inline-flex items-center gap-1"
+                className="text-[#cfd3e0] hover:text-white inline-flex items-center gap-1"
               >
                 USDC: {truncAddr(USDC_FACT.address)}
                 <ExternalLink size={10} />
               </a>
               <a
-                href={getAddressExplorerUrl(getContractConfig(currentChainId).treasuryAddress, currentChainId)}
+                href={getAddressExplorerUrl(getContractConfig(ARC_MAINNET_CHAIN_ID).treasuryAddress, ARC_MAINNET_CHAIN_ID)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-[#9CA3AF] hover:text-white inline-flex items-center gap-1"
+                className="text-[#cfd3e0] hover:text-white inline-flex items-center gap-1"
               >
-                Treasury (5%): {truncAddr(getContractConfig(currentChainId).treasuryAddress)}
+                Treasury (5%): {truncAddr(getContractConfig(ARC_MAINNET_CHAIN_ID).treasuryAddress)}
                 <ExternalLink size={10} />
               </a>
             </div>

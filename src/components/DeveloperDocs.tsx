@@ -14,7 +14,7 @@ import {
   PAYGATE402_ADDRESS,
   PROTOCOL_TREASURY_ADDRESS,
   USDC_FACT,
-  ARC_TESTNET_CHAIN_ID,
+  ARC_MAINNET_CHAIN_ID,
   DEPLOY_TX_HASH,
   getContractExplorerUrl,
   getAddressExplorerUrl,
@@ -34,21 +34,28 @@ const SDK_SNIPPETS: Record<SdkLang, { title: string; filename: string; code: str
     filename: 'agent-client.ts',
     code: `/**
  * PayGate402 — Autonomous TypeScript / Viem v2 Client
- * Discovers HTTP 402 endpoints, settles 95/5 USDC split on Arc Testnet,
+ * Discovers HTTP 402 endpoints, settles 95/5 USDC split on Arc Mainnet,
  * and verifies on-chain access grant.
  */
-import { createWalletClient, createPublicClient, http, parseUnits, keccak256, toHex } from 'viem'
+import { createWalletClient, createPublicClient, http, parseUnits, keccak256, toHex, defineChain } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
-import { arcTestnet } from 'viem/chains'
+
+export const arcMainnet = defineChain({
+  id: 5042,
+  name: 'Arc',
+  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 6 },
+  rpcUrls: { default: { http: ['https://rpc.mainnet.arc.io'] } },
+  blockExplorers: { default: { name: 'Arc Explorer', url: 'https://explorer.arc.io' } },
+})
 
 const PAYGATE402_ADDRESS = '${PAYGATE402_ADDRESS}' as const
 const USDC_ADDRESS       = '${USDC_FACT.address}' as const
-const RPC_URL            = 'https://rpc.testnet.arc.io'
+const RPC_URL            = 'https://rpc.mainnet.arc.io'
 
 const account = privateKeyToAccount(process.env.AGENT_PRIVATE_KEY as \`0x\${string}\`)
 
-const publicClient = createPublicClient({ chain: arcTestnet, transport: http(RPC_URL) })
-const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http(RPC_URL) })
+const publicClient = createPublicClient({ chain: arcMainnet, transport: http(RPC_URL) })
+const walletClient = createWalletClient({ account, chain: arcMainnet, transport: http(RPC_URL) })
 
 const PAYGATE_ABI = [
   {
@@ -123,16 +130,16 @@ export async function payAndCallProtectedEndpoint(serviceId: bigint, priceUsdc: 
     filename: 'paygate_agent.py',
     code: `"""
 PayGate402 — Autonomous Python AI Agent
-Handles HTTP 402 responses by settling USDC on Arc Testnet (Chain ID 5042002).
+Handles HTTP 402 responses by settling USDC on Arc Mainnet (Chain ID 5042).
 """
 import os
 import time
 from web3 import Web3
 
-RPC_URL            = "https://rpc.testnet.arc.io"
+RPC_URL            = "https://rpc.mainnet.arc.io"
 PAYGATE402_ADDRESS = "${PAYGATE402_ADDRESS}"
 USDC_ADDRESS       = "${USDC_FACT.address}"
-CHAIN_ID           = 5042002
+CHAIN_ID           = 5042
 
 w3   = Web3(Web3.HTTPProvider(RPC_URL))
 acct = w3.eth.account.from_key(os.environ["AGENT_PRIVATE_KEY"])
@@ -207,10 +214,10 @@ def unlock_402_service(service_id: int, price_usdc: float) -> str:
     title: 'cURL + Foundry Cast CLI',
     filename: 'paygate-402-flow.sh',
     code: `#!/usr/bin/env bash
-# PayGate402 — HTTP 402 Command-Line Settlement Flow on Arc Testnet
+# PayGate402 — HTTP 402 Command-Line Settlement Flow on Arc Mainnet
 set -euo pipefail
 
-RPC_URL="https://rpc.testnet.arc.io"
+RPC_URL="https://rpc.mainnet.arc.io"
 PAYGATE="${PAYGATE402_ADDRESS}"
 USDC="${USDC_FACT.address}"
 SERVICE_ID=0
@@ -255,7 +262,7 @@ pragma solidity ^0.8.20;
 
 /**
  * @title IPayGate402
- * @notice Deployed on Arc Testnet at ${PAYGATE402_ADDRESS}
+ * @notice Deployed on Arc Mainnet at ${PAYGATE402_ADDRESS}
  * @dev Splits every payment 95% to service.provider and 5% to protocolTreasury (500 / 10000 BPS).
  */
 interface IPayGate402 {
@@ -361,7 +368,7 @@ export function DeveloperDocs({ onNavigate }: DeveloperDocsProps) {
             </span>
           </div>
           <p className="text-sm text-[#9CA3AF] mt-1">
-            Complete reference for integrating HTTP 402 micropayments, verifying access on Arc Testnet, and building autonomous payment agents.
+            Complete reference for integrating HTTP 402 micropayments, verifying access on Arc Mainnet, and building autonomous payment agents.
           </p>
         </div>
 
@@ -390,7 +397,7 @@ export function DeveloperDocs({ onNavigate }: DeveloperDocsProps) {
           <p className="text-xs sm:text-sm text-[#9CA3AF] leading-relaxed">
             HTTP status code <code className="mono text-white bg-white/[0.06] px-1.5 py-0.5 rounded">402 Payment Required</code> was
             reserved in RFC 9110 for digital cash and micropayment systems. <strong className="text-white">PayGate402</strong> implements
-            this specification on <strong className="text-white">Arc Testnet</strong> using native 6-decimal ERC-20 USDC and deterministic smart contract settlement.
+            this specification on <strong className="text-white">Arc Mainnet</strong> using native 6-decimal ERC-20 USDC and deterministic smart contract settlement.
           </p>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
@@ -427,7 +434,7 @@ export function DeveloperDocs({ onNavigate }: DeveloperDocsProps) {
               Deployed Contract Constants
             </h2>
             <span className="pg-badge bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 mono">
-              Chain {ARC_TESTNET_CHAIN_ID}
+              Chain {ARC_MAINNET_CHAIN_ID}
             </span>
           </div>
 
@@ -491,7 +498,7 @@ export function DeveloperDocs({ onNavigate }: DeveloperDocsProps) {
 
             <div className="py-2.5 flex items-center justify-between gap-2">
               <span className="text-[#9CA3AF]">RPC Endpoint</span>
-              <span className="mono text-[#D1D5DB]">https://rpc.testnet.arc.io</span>
+              <span className="mono text-[#D1D5DB]">https://rpc.mainnet.arc.io</span>
             </div>
 
             <div className="pt-2.5 flex items-center justify-between gap-2">

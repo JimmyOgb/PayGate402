@@ -93,10 +93,10 @@ export function ServiceCard({
   const { address, isConnected, chainId } = useAccount()
   const { switchChain } = useSwitchChain()
   const verifiedWallet = Boolean(isConnected && address)
-  const isSupported = isSupportedChain(chainId)
-  const currentChainId = chainId === ARC_MAINNET_CHAIN_ID ? ARC_MAINNET_CHAIN_ID : ARC_TESTNET_CHAIN_ID
-  const contractConfig = getContractConfig(currentChainId)
-  const publicClient = usePublicClient({ chainId: currentChainId })
+  const isSupported = chainId === ARC_MAINNET_CHAIN_ID
+  const currentChainId = ARC_MAINNET_CHAIN_ID
+  const contractConfig = getContractConfig(ARC_MAINNET_CHAIN_ID)
+  const publicClient = usePublicClient({ chainId: ARC_MAINNET_CHAIN_ID })
 
   const [copiedAddr, setCopiedAddr] = useState(false)
   const [copiedHttp, setCopiedHttp] = useState(false)
@@ -167,15 +167,8 @@ export function ServiceCard({
     query: { enabled: verifiedWallet && !isDemoTemplate && isSupported },
   })
 
-  // Verify on-chain access grant (only on Testnet V1 where verifyAccess exists)
-  const { data: hasAccess, refetch: refetchAccess } = useReadContract({
-    address: contractConfig.contractAddress,
-    abi: contractConfig.abi,
-    functionName: 'verifyAccess',
-    args: verifiedWallet && address ? [service.serviceId, address] : undefined,
-    chainId: currentChainId,
-    query: { enabled: verifiedWallet && !isDemoTemplate && currentChainId === ARC_TESTNET_CHAIN_ID },
-  })
+  // Contract V2 on Mainnet removes permanent hasAccess mapping in favor of per-request AccessGranted verification
+  const isPermanentAccessFlag = false
 
   // Write hooks for approve + payForAccess
   const {
@@ -275,7 +268,7 @@ export function ServiceCard({
       void Promise.resolve().then(() => {
         setStep('paid_pending_auth')
         toast.info(
-          'Payment receipt confirmed on Arc Testnet. Click "Sign EIP-712 & Authorize" to complete gateway verification.'
+          'Payment receipt confirmed on Arc Mainnet. Click "Sign EIP-712 & Authorize" to complete gateway verification.'
         )
         if (payHash && address) {
           onRecordTx?.({
@@ -288,12 +281,11 @@ export function ServiceCard({
             timestamp: Date.now(),
           })
         }
-        void refetchAccess()
         onRefresh?.()
       })
     }
     if (!payConfirmed) payDoneRef.current = false
-  }, [payConfirmed, step, payHash, address, service, activeChallenge, refetchAccess, onRefresh, onRecordTx])
+  }, [payConfirmed, step, payHash, address, service, activeChallenge, onRefresh, onRecordTx])
 
   // Explicit user-initiated EIP-712 signature & gateway authorization using authoritative challenge fields
   const handleAuthorizeGateway = useCallback(async () => {
@@ -463,8 +455,7 @@ export function ServiceCard({
 
   // Strictly verified unlock state — only unlocked when payment confirmed AND authorized by gateway for this request
   const isFreshlyPaid = Boolean(!isDemoTemplate && step === 'done' && payConfirmed && gatewayAuthorized)
-  const isPermanentAccessFlag = Boolean(!isDemoTemplate && hasAccess === true && !isFreshlyPaid)
-  const isUnlocked = isFreshlyPaid // Strict per-call security: permanent hasAccess flag alone does not unlock fresh calls
+  const isUnlocked = isFreshlyPaid // Strict per-call security: on-chain receipt + gateway EIP-712
   const isWorking =
     !isDemoTemplate &&
     (step === 'challenging' || step === 'approving' || step === 'paying') &&
@@ -473,7 +464,7 @@ export function ServiceCard({
   const needsApproval = allowance === undefined || allowance < requiredAmountForSplit
   const isMockGateway = Boolean(gatewayHealth?.mockRpc)
 
-  const isWrongNetwork = Boolean(verifiedWallet && chainId !== ARC_TESTNET_CHAIN_ID)
+  const isWrongNetwork = Boolean(verifiedWallet && chainId !== ARC_MAINNET_CHAIN_ID)
   // Compare raw integer units (6 decimals)
   const hasInsufficientBalance = Boolean(
     !isDemoTemplate &&
@@ -485,8 +476,8 @@ export function ServiceCard({
 
   const http402Snippet = `HTTP/1.1 402 Payment Required
 Content-Type: application/json
-WWW-Authenticate: PayGate402 serviceId=${isDemoTemplate ? '<deploy-first>' : service.serviceId.toString()}, chainId=${ARC_TESTNET_CHAIN_ID}
-X-PayGate-Contract: ${PAYGATE402_ADDRESS}
+WWW-Authenticate: PayGate402 serviceId=${isDemoTemplate ? '<deploy-first>' : service.serviceId.toString()}, chainId=${ARC_MAINNET_CHAIN_ID}
+X-PayGate-Contract: ${contractConfig.contractAddress}
 X-Payment-Token: ${USDC_FACT.address} (USDC)
 X-Required-Amount: ${formatUsdcAmount(service.priceInUsdc)} USDC (${service.priceInUsdc.toString()} base units)
 X-Revenue-Split: 95% Provider / 5% Protocol Treasury
@@ -846,7 +837,7 @@ X-Revenue-Split: 95% Provider / 5% Protocol Treasury
             <div className="px-3 pb-3 pt-1 border-t border-white/[0.06] space-y-1.5 text-[11px]">
               <div className="flex items-center justify-between">
                 <span className="text-[#9CA3AF]">Network</span>
-                <span className="mono text-white">Arc Testnet (Chain ID 5042002)</span>
+                <span className="mono text-white">Arc Mainnet (Chain ID 5042)</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-[#9CA3AF]">Token Contract</span>
@@ -956,7 +947,7 @@ X-Revenue-Split: 95% Provider / 5% Protocol Treasury
               ) : isDeployingTemplate ? (
                 <>
                   <span className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                  <span>Deploying to Arc Testnet…</span>
+                  <span>Deploying to Arc Mainnet…</span>
                 </>
               ) : (
                 <>
@@ -999,7 +990,7 @@ X-Revenue-Split: 95% Provider / 5% Protocol Treasury
               )}
             </button>
             <p className="text-[11px] text-[#6B7280] text-center">
-              Arc Testnet transaction confirmed. Sign the EIP-712 challenge to authorize request execution on the gateway.
+              Arc Mainnet transaction confirmed. Sign the EIP-712 challenge to authorize request execution on the gateway.
             </p>
           </div>
         ) : !isUnlocked ? (
@@ -1021,7 +1012,7 @@ X-Revenue-Split: 95% Provider / 5% Protocol Treasury
                   <span className="font-semibold text-amber-200">
                     SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED:{' '}
                   </span>
-                  Gateway is running in Mock RPC mode. Live wallet payments are blocked so real testnet USDC is never spent against offline mock fixtures.
+                  Gateway is running in Mock RPC mode. Live wallet payments are blocked so real USDC is never spent against offline mock fixtures.
                 </div>
               </div>
             )}
@@ -1070,7 +1061,7 @@ X-Revenue-Split: 95% Provider / 5% Protocol Treasury
               {!verifiedWallet ? (
                 'Connect Wallet to Authorize USDC Payment'
               ) : isWrongNetwork ? (
-                'Switch to Arc Testnet to Pay'
+                'Switch to Arc Mainnet to Pay'
               ) : isSmartAccountWallet ? (
                 'Smart Account Unsupported — Connect Standard EOA'
               ) : isMockGateway ? (
@@ -1128,14 +1119,14 @@ X-Revenue-Split: 95% Provider / 5% Protocol Treasury
             {isBalanceError && !isDemoTemplate && verifiedWallet && !isWrongNetwork && (
               <div className="flex items-center justify-center gap-1.5 text-xs text-rose-400">
                 <AlertCircle size={12} />
-                <span>Could not retrieve USDC balance from Arc Testnet RPC.</span>
+                <span>Could not retrieve USDC balance from Arc Mainnet RPC.</span>
               </div>
             )}
 
             {isWrongNetwork && (
               <div className="flex items-center justify-center gap-1.5 text-xs text-amber-400">
                 <AlertCircle size={12} />
-                <span>Connected network is not Arc Testnet (Chain ID 5042002).</span>
+                <span>Connected network is not Arc Mainnet (Chain ID 5042).</span>
               </div>
             )}
 
