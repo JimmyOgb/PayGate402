@@ -23,6 +23,7 @@ import {
   useWaitForTransactionReceipt,
   useReadContract,
   useSignTypedData,
+  useSwitchChain,
 } from 'wagmi'
 import { erc20Abi } from 'viem'
 import { toast } from 'sonner'
@@ -30,7 +31,6 @@ import {
   PAYGATE402,
   PAYGATE402_ADDRESS,
   USDC_FACT,
-  ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   getTxExplorerUrl,
   ServiceData,
@@ -129,7 +129,7 @@ const DEFAULT_FLOW_SERVICES: SelectedServiceMeta[] = [
       {
         _notice: 'DEMO/SYNTHETIC SAMPLE — NOT LIVE MARKET DATA',
         service: 'security-audit',
-        contract: '0xcc69506b784dffda4ee4d221b122303304099971',
+        contract: '0xa27e390CC82793911D805D4cB3E0c50F2117C77A',
         vulnerabilities: [],
         reentrancy_safe: true,
         score: 'A+',
@@ -154,10 +154,11 @@ function syntaxHighlightJson(json: string): string {
 
 export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
   const { address, isConnected, chainId } = useAccount()
-  const currentChainId = chainId === ARC_TESTNET_CHAIN_ID ? ARC_TESTNET_CHAIN_ID : ARC_MAINNET_CHAIN_ID
-  const isMainnet = currentChainId === ARC_MAINNET_CHAIN_ID
-  const chainName = isMainnet ? 'Arc Mainnet' : 'Arc Testnet'
-  const publicClient = usePublicClient({ chainId: currentChainId })
+  const { switchChain } = useSwitchChain()
+  const isMainnet = chainId === ARC_MAINNET_CHAIN_ID
+  const chainName = 'Arc Mainnet'
+  const currentChainId = ARC_MAINNET_CHAIN_ID
+  const publicClient = usePublicClient({ chainId: ARC_MAINNET_CHAIN_ID })
 
   const [currentScreen, setCurrentScreen] = useState<FlowScreen>('selection')
   const [selectedService, setSelectedService] = useState<SelectedServiceMeta>(DEFAULT_FLOW_SERVICES[0])
@@ -372,11 +373,19 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
       return
     }
 
-    // If real wallet connected on Arc (Mainnet or Testnet), enforce EOA & live gateway mode before allowing wallet tx
-    if (isConnected && address && (chainId === ARC_MAINNET_CHAIN_ID || chainId === ARC_TESTNET_CHAIN_ID) && !isSimulated) {
+    // If real wallet connected, enforce Arc Mainnet (5042) and EOA before allowing wallet tx
+    if (isConnected && address && !isSimulated) {
+      if (chainId !== ARC_MAINNET_CHAIN_ID) {
+        const msg = 'Unsupported network. Please switch your wallet to Arc Mainnet (Chain ID 5042) to proceed with payment.'
+        setConfirmError(msg)
+        toast.error(msg)
+        switchChain?.({ chainId: ARC_MAINNET_CHAIN_ID })
+        return
+      }
+
       if (isMockGateway) {
         const msg =
-          `SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED: Gateway is in Mock RPC mode. Live wallet transactions are blocked to prevent spending real ${chainName} USDC.`
+          'SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED: Gateway is in Mock RPC mode. Live wallet transactions are blocked to prevent spending real Arc Mainnet USDC.'
         setConfirmError(msg)
         toast.error(msg)
         return
@@ -415,7 +424,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
           abi: erc20Abi,
           functionName: 'approve',
           args: [PAYGATE402.address, requiredPrice],
-          chainId: currentChainId,
+          chainId: ARC_MAINNET_CHAIN_ID,
         })
         return
       }
@@ -425,7 +434,7 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
         abi: PAYGATE402.abi,
         functionName: 'payForAccess',
         args: [BigInt(challenge.serviceId), challenge.requestId],
-        chainId: currentChainId,
+        chainId: ARC_MAINNET_CHAIN_ID,
       })
       return
     }
@@ -476,10 +485,22 @@ export function FlowDashboard({ onNavigate, onRefresh }: FlowDashboardProps) {
           {/* Network and Wallet Badges */}
           <div className="flex items-center gap-3">
             {/* Network Pill */}
-            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/[0.05] border border-white/[0.08] text-xs text-gray-300">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>{chainName}</span>
-            </div>
+            {isConnected && chainId !== ARC_MAINNET_CHAIN_ID ? (
+              <button
+                type="button"
+                onClick={() => switchChain?.({ chainId: ARC_MAINNET_CHAIN_ID })}
+                className="flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/20 border border-amber-500/40 text-xs text-amber-300 hover:bg-amber-500/30 transition-colors"
+                title="Click to switch to Arc Mainnet"
+              >
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span>Wrong Network (Switch to Arc Mainnet)</span>
+              </button>
+            ) : (
+              <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/[0.05] border border-white/[0.08] text-xs text-gray-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>Arc Mainnet (5042)</span>
+              </div>
+            )}
 
             {/* Wallet Pill */}
             <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-purple-950/40 border border-purple-500/30 text-xs text-purple-200">

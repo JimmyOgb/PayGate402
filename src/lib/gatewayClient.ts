@@ -272,7 +272,7 @@ export function validateAuthoritativeChallenge(
 }
 
 /**
- * Checks if the local/testnet gateway server is online and inspects its operating mode.
+ * Checks if the local or production gateway server is online and inspects its operating mode.
  */
 export async function checkGatewayStatus(gatewayUrl: string = GATEWAY_BASE_URL): Promise<GatewayHealthStatus> {
   try {
@@ -305,7 +305,7 @@ export async function checkGatewayStatus(gatewayUrl: string = GATEWAY_BASE_URL):
 }
 
 /**
- * Checks if the local/testnet gateway server is online
+ * Checks if the local or production gateway server is online
  */
 export async function checkGatewayHealth(gatewayUrl: string = GATEWAY_BASE_URL): Promise<boolean> {
   const status = await checkGatewayStatus(gatewayUrl)
@@ -448,7 +448,7 @@ export async function prepareLivePaymentChallenge(params: {
 
   if (health.mockRpc && !allowMockRpc) {
     throw new GatewayIntegrationError(
-      'SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED: Gateway is currently running in Mock RPC mode (mockRpc: true). Live wallet transactions are blocked to prevent spending real Arc Testnet USDC against offline mock fixtures.',
+      'SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED: Gateway is currently running in Mock RPC mode (mockRpc: true). Live wallet transactions are blocked to prevent spending real Arc USDC against offline mock fixtures.',
       'GATEWAY_IN_MOCK_MODE',
       400
     )

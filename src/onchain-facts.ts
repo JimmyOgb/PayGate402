@@ -59,28 +59,6 @@ interface OnchainFacts {
 const FACTS: OnchainFacts = {
   "chains": [
     {
-      "chainId": 5042002,
-      "name": "Arc Testnet",
-      "isTestnet": true,
-      "family": "arc",
-      "explorerBase": "https://explorer.testnet.arc.io",
-      "rpcUrls": [
-        "https://rpc.testnet.arc.io"
-      ],
-      "nativeCurrency": {
-        "symbol": "USDC",
-        "decimals": 18,
-        "isUsdc": true
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x3600000000000000000000000000000000000000",
-        "decimals": 6
-      },
-      "cctpDomain": 26,
-      "scpBlockchain": "ARC-TESTNET"
-    },
-    {
       "chainId": 5042,
       "name": "Arc",
       "isTestnet": false,
@@ -100,189 +78,6 @@ const FACTS: OnchainFacts = {
         "decimals": 6
       },
       "cctpDomain": 26
-    },
-    {
-      "chainId": 11155111,
-      "name": "Ethereum Sepolia",
-      "isTestnet": true,
-      "explorerBase": "https://sepolia.etherscan.io",
-      "rpcUrls": [
-        "https://11155111.rpc.thirdweb.com"
-      ],
-      "nativeCurrency": {
-        "symbol": "ETH",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-        "decimals": 6
-      },
-      "cctpDomain": 0,
-      "scpBlockchain": "ETH-SEPOLIA"
-    },
-    {
-      "chainId": 84532,
-      "name": "Base Sepolia",
-      "isTestnet": true,
-      "family": "op-stack",
-      "explorerBase": "https://sepolia.basescan.org",
-      "rpcUrls": [
-        "https://sepolia.base.org"
-      ],
-      "nativeCurrency": {
-        "symbol": "ETH",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-        "decimals": 6
-      },
-      "cctpDomain": 6,
-      "scpBlockchain": "BASE-SEPOLIA"
-    },
-    {
-      "chainId": 421614,
-      "name": "Arbitrum Sepolia",
-      "isTestnet": true,
-      "family": "arbitrum",
-      "explorerBase": "https://sepolia.arbiscan.io",
-      "rpcUrls": [
-        "https://sepolia-rollup.arbitrum.io/rpc"
-      ],
-      "nativeCurrency": {
-        "symbol": "ETH",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-        "decimals": 6
-      },
-      "scpBlockchain": "ARB-SEPOLIA"
-    },
-    {
-      "chainId": 43113,
-      "name": "Avalanche Fuji",
-      "isTestnet": true,
-      "explorerBase": "https://testnet.snowtrace.io",
-      "rpcUrls": [
-        "https://api.avax-test.network/ext/bc/C/rpc"
-      ],
-      "nativeCurrency": {
-        "symbol": "AVAX",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x5425890298aed601595a70AB815c96711a31Bc65",
-        "decimals": 6
-      },
-      "cctpDomain": 1,
-      "scpBlockchain": "AVAX-FUJI"
-    },
-    {
-      "chainId": 80002,
-      "name": "Polygon Amoy",
-      "isTestnet": true,
-      "family": "polygon",
-      "explorerBase": "https://amoy.polygonscan.com",
-      "rpcUrls": [
-        "https://polygon-amoy.drpc.org"
-      ],
-      "nativeCurrency": {
-        "symbol": "POL",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582",
-        "decimals": 6
-      },
-      "scpBlockchain": "MATIC-AMOY"
-    },
-    {
-      "chainId": 11155420,
-      "name": "OP Sepolia",
-      "isTestnet": true,
-      "family": "op-stack",
-      "explorerBase": "https://sepolia-optimistic.etherscan.io",
-      "rpcUrls": [
-        "https://sepolia.optimism.io"
-      ],
-      "nativeCurrency": {
-        "symbol": "ETH",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x5fd84259d66Cd46123540766Be93DFE6D43130D7",
-        "decimals": 6
-      },
-      "scpBlockchain": "OP-SEPOLIA"
-    },
-    {
-      "chainId": 1301,
-      "name": "Unichain Sepolia",
-      "isTestnet": true,
-      "family": "op-stack",
-      "explorerBase": "https://sepolia.uniscan.xyz",
-      "rpcUrls": [
-        "https://sepolia.unichain.org"
-      ],
-      "nativeCurrency": {
-        "symbol": "ETH",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x31d0220469e10c4E71834a79b1f276d740d3768F",
-        "decimals": 6
-      },
-      "scpBlockchain": "UNI-SEPOLIA"
-    },
-    {
-      "chainId": 10143,
-      "name": "Monad Testnet",
-      "isTestnet": true,
-      "explorerBase": "https://testnet.monadexplorer.com",
-      "rpcUrls": [
-        "https://testnet-rpc.monad.xyz"
-      ],
-      "nativeCurrency": {
-        "symbol": "MON",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "scpBlockchain": "MONAD-TESTNET"
-    },
-    {
-      "chainId": 1328,
-      "name": "Sei Testnet",
-      "isTestnet": true,
-      "explorerBase": "https://testnet.seiscan.io",
-      "rpcUrls": [
-        "https://evm-rpc-testnet.sei-apis.com"
-      ],
-      "nativeCurrency": {
-        "symbol": "SEI",
-        "decimals": 18,
-        "isUsdc": false
-      },
-      "usdc": {
-        "symbol": "USDC",
-        "address": "0x4fCF1784B31630811181f670Aea7A7bEF803eaED",
-        "decimals": 6
-      },
-      "cctpDomain": 16
     },
     {
       "chainId": 1,
@@ -469,37 +264,7 @@ const FACTS: OnchainFacts = {
     }
   ],
   "protocolContracts": [
-    {
-      "name": "TokenMessengerV2",
-      "address": "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
-      "protocol": "CCTP",
-      "networkKind": "testnet"
-    },
-    {
-      "name": "MessageTransmitterV2",
-      "address": "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
-      "protocol": "CCTP",
-      "networkKind": "testnet"
-    },
-    {
-      "name": "TokenMinterV2",
-      "address": "0xb43db544E2c27092c107639Ad201b3dEfAbcF192",
-      "protocol": "CCTP",
-      "networkKind": "testnet"
-    },
-    {
-      "name": "MessageV2",
-      "address": "0xbaC0179bB358A8936169a63408C8481D582390C4",
-      "protocol": "CCTP",
-      "networkKind": "testnet"
-    },
-    {
-      "name": "BridgingKitContract",
-      "address": "0xC5567a5E3370d4DBfB0540025078e283e36A363d",
-      "protocol": "CCTP",
-      "networkKind": "testnet"
-    },
-    {
+                        {
       "name": "TokenMessengerV2",
       "address": "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d",
       "protocol": "CCTP",
@@ -523,19 +288,7 @@ const FACTS: OnchainFacts = {
       "protocol": "CCTP",
       "networkKind": "mainnet"
     },
-    {
-      "name": "GatewayWallet",
-      "address": "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
-      "protocol": "Gateway",
-      "networkKind": "testnet"
-    },
-    {
-      "name": "GatewayMinter",
-      "address": "0x0022222ABE238Cc2C7Bb1f21003F0a260052475B",
-      "protocol": "Gateway",
-      "networkKind": "testnet"
-    },
-    {
+            {
       "name": "GatewayWallet",
       "address": "0x77777777Dcc4d5A8B6E418Fd04D8997ef11000eE",
       "protocol": "Gateway",

@@ -204,8 +204,7 @@ def unlock_402_service(service_id: int, price_usdc: float) -> str:
     w3.eth.wait_for_transaction_receipt(pay_hash)
 
     # Step 3: Access confirmation
-    # On Testnet v1: historical on-chain flag: gate.functions.verifyAccess(service_id, acct.address).call()
-    # On v2 / Production: Gateway verifies AccessGranted event receipt + EIP-712 signature per call
+    # Note: Gateway verifies on-chain AccessGranted event receipt + EIP-712 caller authorization per call
     receipt = w3.eth.get_transaction_receipt(pay_hash)
     assert receipt["status"] == 1, "Payment transaction failed"
     return "0x" + pay_hash.hex()`,
@@ -244,9 +243,7 @@ TX_HASH=$(cast send "$PAYGATE" \\
 echo "Settlement Tx: $TX_HASH"
 
 # 3. Check access grant
-# On Testnet v1 contract:
-# cast call "$PAYGATE" "verifyAccess(uint256,address)(bool)" "$SERVICE_ID" "$CALLER_ADDRESS" --rpc-url "$RPC_URL"
-# On v2 / Production: Gateway validates AccessGranted receipt log & X-Payment-Signature
+# Gateway validates on-chain AccessGranted receipt log & caller EIP-712 signature
 
 # 4. Retry HTTP request with X-Payment-Tx proof header
 curl -i -X POST "https://api.paygate402.arc/v1/services/$SERVICE_ID" \\
@@ -303,7 +300,7 @@ interface IPayGate402 {
 
     function payForAccess(uint256 serviceId, bytes32 requestId) external;
 
-    // Testnet v1 legacy view (removed in PayGate402V2 in favor of per-call AccessGranted events)
+    // Legacy v1 interface view (superseded in PayGate402V2 by per-call AccessGranted events)
     function verifyAccess(uint256 serviceId, address caller) external view returns (bool);
 
     function setServiceActive(uint256 serviceId, bool active) external;

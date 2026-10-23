@@ -31,6 +31,19 @@ interface TransactionsViewProps {
   logsError: string | null
   onRefresh: () => void
   onNavigate: (route: AppRoute) => void
+  metrics?: {
+    totalServices: number
+    activeServicesCount: number
+    totalCalls: bigint
+    totalVolumeUsdc: bigint
+    totalProviderPayoutUsdc: bigint
+    totalProtocolFeeUsdc: bigint
+    myServicesCount?: number
+    myTotalCalls?: bigint
+    myGrossRevenue?: bigint
+    myNetEarnings?: bigint
+    myProtocolFees?: bigint
+  }
 }
 
 type EventKindFilter = 'all' | 'AccessGranted' | 'ServiceRegistered' | 'ServiceStatusUpdated'
@@ -41,6 +54,7 @@ export function TransactionsView({
   logsError,
   onRefresh,
   onNavigate,
+  metrics,
 }: TransactionsViewProps) {
   const [kindFilter, setKindFilter] = useState<EventKindFilter>('all')
   const [search, setSearch] = useState('')
@@ -105,6 +119,48 @@ export function TransactionsView({
           </a>
         </div>
       </div>
+
+      {/* On-Chain Protocol Metrics Summary */}
+      {metrics && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="pg-card p-4">
+            <div className="text-[11px] font-mono text-[#9CA3AF]">Registered Services</div>
+            <div className="text-xl font-bold font-mono text-white mt-1 tabular-nums">
+              {metrics.totalServices}
+            </div>
+            <div className="text-[10px] mono text-emerald-400 mt-1">
+              {metrics.activeServicesCount} active on Arc Mainnet
+            </div>
+          </div>
+          <div className="pg-card p-4">
+            <div className="text-[11px] font-mono text-[#9CA3AF]">Settled Volume</div>
+            <div className="text-xl font-bold font-mono text-white mt-1 tabular-nums">
+              {formatUsdcAmount(metrics.totalVolumeUsdc)} <span className="text-xs font-normal text-[#9CA3AF]">USDC</span>
+            </div>
+            <div className="text-[10px] mono text-[#9CA3AF] mt-1">
+              Provider Share (95%): {formatUsdcAmount(metrics.totalProviderPayoutUsdc)} USDC
+            </div>
+          </div>
+          <div className="pg-card p-4">
+            <div className="text-[11px] font-mono text-[#9CA3AF]">Verified Access Grants</div>
+            <div className="text-xl font-bold font-mono text-white mt-1 tabular-nums">
+              {Number(metrics.totalCalls).toLocaleString()}
+            </div>
+            <div className="text-[10px] mono text-blue-400 mt-1">
+              Single-use Replay Protected
+            </div>
+          </div>
+          <div className="pg-card p-4">
+            <div className="text-[11px] font-mono text-[#9CA3AF]">Protocol Fee (5%)</div>
+            <div className="text-xl font-bold font-mono text-white mt-1 tabular-nums">
+              {formatUsdcAmount(metrics.totalProtocolFeeUsdc)} <span className="text-xs font-normal text-[#9CA3AF]">USDC</span>
+            </div>
+            <div className="text-[10px] mono text-[var(--peach)] mt-1">
+              500 BPS Treasury Split
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Filter Bar */}
       <div className="pg-card p-4 flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">

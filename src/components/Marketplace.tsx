@@ -14,7 +14,6 @@ import { useAccount, useWriteContract, useWaitForTransactionReceipt, useSwitchCh
 import { toast } from 'sonner'
 import {
   PAYGATE402,
-  ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   getContractConfig,
   isSupportedChain,

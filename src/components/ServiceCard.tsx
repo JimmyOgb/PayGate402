@@ -30,7 +30,6 @@ import {
   PAYGATE402_ADDRESS,
   PROTOCOL_TREASURY_ADDRESS,
   USDC_FACT,
-  ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   getContractConfig,
   isSupportedChain,

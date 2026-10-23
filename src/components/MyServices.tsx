@@ -19,7 +19,6 @@ import { toast } from 'sonner'
 import {
   PAYGATE402,
   PROTOCOL_TREASURY_ADDRESS,
-  ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   getContractConfig,
   isSupportedChain,
@@ -240,8 +239,8 @@ export function MyServices({
   }
 
   const isSupported = isSupportedChain(chainId)
-  const currentChainId = chainId === ARC_MAINNET_CHAIN_ID ? ARC_MAINNET_CHAIN_ID : ARC_TESTNET_CHAIN_ID
-  const contractConfig = getContractConfig(currentChainId)
+  const currentChainId = ARC_MAINNET_CHAIN_ID
+  const contractConfig = getContractConfig(ARC_MAINNET_CHAIN_ID)
 
   const handleRegisterSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -250,6 +249,7 @@ export function MyServices({
       return
     }
     if (!isSupported) {
+      toast.error('Unsupported network. Please switch to Arc Mainnet (Chain ID 5042).')
       switchChain({ chainId: ARC_MAINNET_CHAIN_ID })
       return
     }

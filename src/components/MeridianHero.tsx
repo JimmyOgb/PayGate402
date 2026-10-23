@@ -1,47 +1,16 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { ConnectKitButton } from 'connectkit'
-import { useAccount, useSwitchChain } from 'wagmi'
-import {
-  ExternalLink,
-  Wallet,
-  AlertTriangle,
-  Compass,
-  Server,
-  Activity,
-  BookOpen,
-  Terminal,
-} from 'lucide-react'
-import {
-  ARC_MAINNET_CHAIN_ID,
-  USDC_FACT,
-  formatUsdcAmount,
-  truncAddr,
-  getContractConfig,
-  getContractExplorerUrl,
-} from '@/lib/paygate402'
+import { useEffect, useRef, useCallback } from 'react'
 import { AppRoute } from './Header'
 
 interface MeridianHeroProps {
   onNavigate: (route: AppRoute) => void
-  serviceCount: number
-  myServiceCount: number
+  serviceCount?: number
+  myServiceCount?: number
   usdcBalance?: bigint
 }
 
 export function MeridianHero({
   onNavigate,
-  serviceCount,
-  myServiceCount,
-  usdcBalance,
 }: MeridianHeroProps) {
-  const { address, isConnected, chainId } = useAccount()
-  const { switchChain } = useSwitchChain()
-  const verifiedWallet = Boolean(isConnected && address)
-  const isCorrectChain = chainId === ARC_MAINNET_CHAIN_ID
-  const isWrongNetwork = verifiedWallet && !isCorrectChain
-  const contractConfig = getContractConfig(ARC_MAINNET_CHAIN_ID)
-
-  const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const heroRef = useRef<HTMLElement | null>(null)
   const photoRef = useRef<HTMLDivElement | null>(null)
   const stageRef = useRef<HTMLElement | null>(null)
@@ -66,8 +35,8 @@ export function MeridianHero({
     const vw = window.innerWidth
     const vh = window.innerHeight
     const heroEl = heroRef.current
-    const H = heroEl?.offsetHeight || vh
-    const u = Math.min(vw / 1280, vh / 800)
+    const H = heroEl?.offsetHeight || Math.max(vh - 56, 400)
+    const u = Math.min(vw / 1280, H / 744)
 
     document.documentElement.style.setProperty('--u', String(u))
     document.documentElement.style.setProperty('--vh', `${vh}px`)
@@ -191,9 +160,6 @@ export function MeridianHero({
       const heroEl = heroRef.current
       if (!heroEl) return
 
-      const brand = heroEl.querySelector('a.brand')
-      const more = heroEl.querySelector('button.more')
-      const rail = heroEl.querySelector('span.rail')
       const pill = heroEl.querySelector('a.pill')
       const h1 = h1Ref.current
       const lede = heroEl.querySelector('p.lede')
@@ -216,39 +182,6 @@ export function MeridianHero({
       const b2Svg = b2?.querySelector('svg')
 
       const anims: Animation[] = []
-
-      if (brand) {
-        anims.push(
-          brand.animate(
-            [
-              { opacity: 0, transform: `translate(0, ${-8 * d}px)` },
-              { opacity: 1, transform: 'translate(0, 0)' },
-            ],
-            { delay: 150, duration: 800, easing: QUART, fill: 'backwards' }
-          )
-        )
-      }
-
-      if (more) {
-        anims.push(
-          more.animate(
-            [
-              { opacity: 0, transform: `translate(0, ${-8 * d}px)` },
-              { opacity: 1, transform: 'translate(0, 0)' },
-            ],
-            { delay: 250, duration: 800, easing: QUART, fill: 'backwards' }
-          )
-        )
-      }
-
-      if (rail) {
-        anims.push(
-          rail.animate(
-            [{ transform: 'scale(1, 0)' }, { transform: 'scale(1, 1)' }],
-            { delay: 350, duration: 900, easing: EXPO, fill: 'backwards' }
-          )
-        )
-      }
 
       if (pill) {
         anims.push(
@@ -384,216 +317,6 @@ export function MeridianHero({
         />
       </div>
 
-      {/* Top Chrome: Left Brand Wordmark */}
-      <div className="nav-l">
-        <a
-          className="brand"
-          href="#overview"
-          onClick={e => {
-            e.preventDefault()
-            onNavigate('overview')
-          }}
-          aria-label="PayGate402 home"
-          style={{ '--nx': '-0.5px', '--ny': '-2.75px' } as React.CSSProperties}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="#fff">
-            <circle cx="12.2" cy="11.9" r="8.45" strokeWidth="2" />
-            <path d="M12.2 0.1V24" strokeWidth="1.9" />
-            <path d="M0 11.9H24.4" strokeWidth="1.95" />
-          </svg>
-          <span>
-            PayGate<span style={{ color: 'var(--peach)' }}>402</span>
-          </span>
-        </a>
-      </div>
-
-      {/* Top Chrome: Right Glass Controls */}
-      <div className="nav-r">
-        {/* Right Action Bar (Wallet + MORE Button + Rail) */}
-        <div className="absolute right-[120px] top-[23px] flex items-center gap-2">
-          {/* Wrong Network Switcher Button */}
-          {isWrongNetwork ? (
-            <button
-              type="button"
-              onClick={() => switchChain({ chainId: ARC_MAINNET_CHAIN_ID })}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-mono font-medium hover:bg-amber-500/30 transition-colors"
-              title="Switch wallet to Arc Mainnet (Chain ID 5042)"
-            >
-              <AlertTriangle size={13} className="text-amber-400" />
-              <span>Switch to Mainnet (5042)</span>
-            </button>
-          ) : (
-            <a
-              href={getContractExplorerUrl(ARC_MAINNET_CHAIN_ID)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-[#33344a]/60 backdrop-blur-[14px] text-xs text-[#cfd3e0] border border-white/10 hover:border-white/20 transition-colors"
-              title={`PayGate402 Contract (${contractConfig.contractAddress}) on Arc Mainnet`}
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]" />
-              <span className="font-medium font-sans">Arc Mainnet</span>
-              <span className="text-[#989eac] mono text-[11px]">{truncAddr(contractConfig.contractAddress)}</span>
-              <ExternalLink size={10} className="text-[#989eac]" />
-            </a>
-          )}
-
-          {/* USDC Balance Display */}
-          {verifiedWallet && !isWrongNetwork && usdcBalance !== undefined && (
-            <div
-              className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-[#33344a]/60 backdrop-blur-[14px] border border-white/10 text-xs"
-              title="Verified on-chain USDC balance on Arc Mainnet"
-            >
-              <span className="font-semibold text-white mono tabular-nums">
-                {formatUsdcAmount(usdcBalance)}
-              </span>
-              <span className="text-[#989eac] mono text-[11px]">USDC</span>
-            </div>
-          )}
-
-          {/* ConnectKit Wallet Connect Button */}
-          <ConnectKitButton.Custom>
-            {({ isConnected: ckConnected, show, address: ckAddr }) => {
-              const connected = Boolean(ckConnected && ckAddr)
-              return (
-                <button
-                  type="button"
-                  onClick={show}
-                  className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono font-medium border transition-colors ${
-                    connected
-                      ? 'bg-[#33344a]/60 backdrop-blur-[14px] border-white/15 text-white hover:bg-[#424260]/66'
-                      : 'bg-[#f93f28] border-[#f93f28] text-[#331200] hover:brightness-105'
-                  }`}
-                >
-                  <Wallet size={12} className={connected ? 'text-[var(--peach)]' : 'text-[#331200]'} />
-                  <span>
-                    {connected && ckAddr
-                      ? `${ckAddr.slice(0, 6)}…${ckAddr.slice(-4)}`
-                      : 'CONNECT'}
-                  </span>
-                </button>
-              )
-            }}
-          </ConnectKitButton.Custom>
-        </div>
-
-        {/* MORE Menu Button */}
-        <button
-          className="more"
-          aria-haspopup="true"
-          aria-expanded={moreMenuOpen}
-          onClick={() => setMoreMenuOpen(o => !o)}
-          style={{ '--nx': '0.25px', '--ny': '-1.0px' } as React.CSSProperties}
-        >
-          <svg className="dots" viewBox="0 0 8.4 8.4" fill="#fff">
-            <rect x="0" y="0" width="2.4" height="2.4" />
-            <rect x="6" y="0" width="2.4" height="2.4" />
-            <rect x="0" y="6" width="2.4" height="2.4" />
-            <rect x="6" y="6" width="2.4" height="2.4" />
-          </svg>
-          <span>MORE</span>
-        </button>
-
-        {/* Thin Grey Rail Accent */}
-        <span className="rail" aria-hidden="true" />
-
-        {/* Executive Dropdown Menu for MORE */}
-        {moreMenuOpen && (
-          <div
-            className="absolute right-[29.65px] top-[66px] w-64 bg-[#0B0E1B]/95 backdrop-blur-[16px] border border-white/10 p-2 shadow-2xl z-50 flex flex-col gap-1 text-xs"
-            role="menu"
-          >
-            <div className="px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wider text-[#989eac] border-b border-white/10">
-              Protocol Navigation
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                onNavigate('explore')
-                setMoreMenuOpen(false)
-              }}
-              className="flex items-center justify-between px-2.5 py-2 hover:bg-white/[0.06] text-white text-left transition-colors"
-            >
-              <span className="flex items-center gap-2">
-                <Compass size={14} className="text-[var(--peach)]" />
-                Explore Services
-              </span>
-              <span className="mono text-[10px] text-[#989eac]">{serviceCount} on-chain</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onNavigate('my-services')
-                setMoreMenuOpen(false)
-              }}
-              className="flex items-center justify-between px-2.5 py-2 hover:bg-white/[0.06] text-white text-left transition-colors"
-            >
-              <span className="flex items-center gap-2">
-                <Server size={14} className="text-[#c9ccd4]" />
-                My Endpoints &amp; Register
-              </span>
-              <span className="mono text-[10px] text-[#989eac]">{myServiceCount} yours</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onNavigate('transactions')
-                setMoreMenuOpen(false)
-              }}
-              className="flex items-center gap-2 px-2.5 py-2 hover:bg-white/[0.06] text-white text-left transition-colors"
-            >
-              <Activity size={14} className="text-[#c9ccd4]" />
-              Recent Transactions &amp; Events
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onNavigate('docs')
-                setMoreMenuOpen(false)
-              }}
-              className="flex items-center gap-2 px-2.5 py-2 hover:bg-white/[0.06] text-white text-left transition-colors"
-            >
-              <BookOpen size={14} className="text-[#c9ccd4]" />
-              Developer Docs &amp; SDKs
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onNavigate('cli')
-                setMoreMenuOpen(false)
-              }}
-              className="flex items-center justify-between px-2.5 py-2 hover:bg-white/[0.06] text-white text-left transition-colors"
-            >
-              <span className="flex items-center gap-2">
-                <Terminal size={14} className="text-[var(--peach)]" />
-                AI Agent CLI Simulator
-              </span>
-              <span className="mono text-[10px] bg-white/10 px-1.5 py-0.5 text-white">Live</span>
-            </button>
-
-            <div className="pt-1 mt-1 border-t border-white/10 flex flex-col gap-1">
-              <a
-                href={getContractExplorerUrl(ARC_MAINNET_CHAIN_ID)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center justify-between px-2.5 py-1.5 text-[11px] text-[#cfd3e0] hover:text-white hover:bg-white/[0.04]"
-              >
-                <span className="mono">Arc Mainnet Explorer</span>
-                <ExternalLink size={10} />
-              </a>
-              <a
-                href="https://studio.arc.io/app/32f7ab57-a1ca-4bc8-a29b-86f59668911c"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center justify-between px-2.5 py-1.5 text-[11px] text-[#cfd3e0] hover:text-white hover:bg-white/[0.04]"
-              >
-                <span>Built with Arc Studio</span>
-                <ExternalLink size={10} />
-              </a>
-            </div>
-          </div>
-        )}
-      </div>
-
       {/* Main 1280×800 Scaled Composition Stage */}
       <main ref={stageRef} className="stage" id="stage">
         {/* Eyebrow Pill */}
@@ -617,7 +340,7 @@ export function MeridianHero({
         {/* Headline */}
         <h1
           ref={h1Ref}
-          style={{ '--nx': '-3.0px', '--ny': '159.5px' } as React.CSSProperties}
+          style={{ '--nx': '-3.0px', '--ny': '110px' } as React.CSSProperties}
         >
           Move payments forward together
         </h1>
@@ -625,7 +348,7 @@ export function MeridianHero({
         {/* 3-Line Lede */}
         <p
           className="lede"
-          style={{ '--nx': '-3.0px', '--ny': '236.5px' } as React.CSSProperties}
+          style={{ '--nx': '-3.0px', '--ny': '186px' } as React.CSSProperties}
         >
           Smart reports from teams using PayGate402 to manage spending,
           <br className="d" />

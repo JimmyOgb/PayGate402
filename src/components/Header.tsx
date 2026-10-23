@@ -18,7 +18,6 @@ import { useAccount, useReadContract, useSwitchChain } from 'wagmi'
 import { erc20Abi } from 'viem'
 import {
   USDC_FACT,
-  ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   PAYGATE402_ADDRESS,
   getContractConfig,
@@ -73,7 +72,7 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
   return (
     <header className="sticky top-0 z-50 border-b border-white/10 bg-[#020816]/90 backdrop-blur-[14px]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16 gap-4">
+        <div className="flex items-center justify-between h-14 gap-4">
           {/* Left: Brand identity + Desktop navigation */}
           <div className="flex items-center gap-6 min-w-0">
             <button
@@ -110,7 +109,7 @@ export function Header({ activeRoute, onNavigate, serviceCount = 0, myServiceCou
                     type="button"
                     onClick={() => handleNav(item.id)}
                     aria-current={isActive ? 'page' : undefined}
-                    className={`relative px-3 py-2 text-xs font-mono font-medium whitespace-nowrap transition-all flex items-center gap-1.5 ${
+                    className={`relative px-3 py-1.5 text-xs font-mono font-medium whitespace-nowrap transition-all flex items-center gap-1.5 ${
                       isActive
                         ? 'text-white bg-white/10'
                         : 'text-[#989eac] hover:text-white hover:bg-white/[0.04]'

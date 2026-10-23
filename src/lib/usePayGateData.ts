@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useAccount, useReadContract, useReadContracts, usePublicClient } from 'wagmi'
 import { parseAbiItem, Abi } from 'viem'
 import {
-  ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   getContractConfig,
   ServiceData,

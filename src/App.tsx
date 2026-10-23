@@ -113,21 +113,6 @@ export default function App() {
     query: { enabled: Boolean(isConnected && address) },
   })
 
-  const [scrolledPastHero, setScrolledPastHero] = useState(false)
-
-  useEffect(() => {
-    if (activeRoute !== 'overview') {
-      setScrolledPastHero(true)
-      return
-    }
-    const onScroll = () => {
-      setScrolledPastHero(window.scrollY > 400)
-    }
-    onScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [activeRoute])
-
   const handleNavigate = useCallback((route: AppRoute) => {
     setActiveRoute(route)
     if (typeof window !== 'undefined') {
@@ -146,18 +131,16 @@ export default function App() {
 
   return (
     <AppErrorBoundary>
-      <div className="min-h-dvh flex flex-col bg-[#020816] text-[#F6F8FC]">
-        {/* Sticky Header: Present on secondary routes and when scrolled down on Overview */}
-        {(activeRoute !== 'overview' || scrolledPastHero) && (
-          <Header
-            activeRoute={activeRoute}
-            onNavigate={handleNavigate}
-            serviceCount={serviceCount}
-            myServiceCount={myServices.length}
-          />
-        )}
+      <div className="min-h-dvh flex flex-col bg-[#020816] text-[#F6F8FC] overflow-x-hidden">
+        {/* Persistent Brand Header & Navigation: Always visible across all routes */}
+        <Header
+          activeRoute={activeRoute}
+          onNavigate={handleNavigate}
+          serviceCount={serviceCount}
+          myServiceCount={myServices.length}
+        />
 
-        <main className="flex-1 w-full">
+        <main className={`flex-1 w-full ${activeRoute === 'overview' ? 'flex flex-col' : ''}`}>
           {activeRoute === 'overview' && (
             <Overview
               isConnected={isConnected}
@@ -205,6 +188,7 @@ export default function App() {
                   activities={activities}
                   logsLoading={logsLoading}
                   logsError={logsError}
+                  metrics={metrics}
                   onRefresh={refetchAll}
                   onNavigate={handleNavigate}
                 />
@@ -219,8 +203,9 @@ export default function App() {
           )}
         </main>
 
-        {/* Footer */}
-        <footer className="border-t border-white/10 bg-[#070B16] mt-16">
+        {/* Footer: Rendered on secondary scrollable routes only, keeping homepage a clean full-viewport hero */}
+        {activeRoute !== 'overview' && (
+          <footer className="border-t border-white/10 bg-[#070B16] mt-16">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-[#989eac]">
             <div className="flex items-center gap-2.5">
               <div className="w-6 h-6 bg-[var(--peach)]/10 border border-[var(--peach)]/30 flex items-center justify-center">
@@ -262,6 +247,7 @@ export default function App() {
             </div>
           </div>
         </footer>
+        )}
       </div>
     </AppErrorBoundary>
   )

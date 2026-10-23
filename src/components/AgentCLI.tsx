@@ -15,7 +15,6 @@ import {
   PAYGATE402_ADDRESS,
   PROTOCOL_TREASURY_ADDRESS,
   USDC_FACT,
-  ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   getContractConfig,
   isSupportedChain,
@@ -69,16 +68,16 @@ interface AgentCLIProps {
 export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) {
   const { address, isConnected, chainId } = useAccount()
   const isSupported = isSupportedChain(chainId)
-  const currentChainId = chainId === ARC_MAINNET_CHAIN_ID ? ARC_MAINNET_CHAIN_ID : ARC_TESTNET_CHAIN_ID
-  const contractConfig = getContractConfig(currentChainId)
-  const publicClient = usePublicClient({ chainId: currentChainId })
+  const currentChainId = ARC_MAINNET_CHAIN_ID
+  const contractConfig = getContractConfig(ARC_MAINNET_CHAIN_ID)
+  const publicClient = usePublicClient({ chainId: ARC_MAINNET_CHAIN_ID })
   const { switchChain } = useSwitchChain()
   const { signTypedDataAsync } = useSignTypedData()
   const verifiedWallet = Boolean(isConnected && address)
   const isCorrectChain = isSupported
 
   const [lines, setLines] = useState<Line[]>([
-    mkLine(`PayGate402 Agent Runtime — ${contractConfig.chainName} (Chain ID ${currentChainId})`, 'system'),
+    mkLine(`PayGate402 Agent Runtime — Arc Mainnet (Chain ID ${ARC_MAINNET_CHAIN_ID})`, 'system'),
     mkLine(`Target Contract: ${contractConfig.contractAddress}`, 'dim'),
     mkLine('Type `help` or click a quick command below to inspect or execute.', 'dim'),
   ])
@@ -86,7 +85,6 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState<string[]>([])
   const [histIdx, setHistIdx] = useState(-1)
-  const [activeServiceId, setActiveServiceId] = useState<number | null>(null)
   const termRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -152,19 +150,6 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
     query: { enabled: verifiedWallet },
   })
 
-  // Access check (informational on-chain mapping only on Testnet V1)
-  const { data: hasAccess, refetch: refetchAccess } = useReadContract({
-    address: contractConfig.contractAddress,
-    abi: contractConfig.abi,
-    functionName: 'verifyAccess',
-    args:
-      verifiedWallet && address && activeServiceId !== null
-        ? [BigInt(activeServiceId), address]
-        : undefined,
-    chainId: currentChainId,
-    query: { enabled: verifiedWallet && activeServiceId !== null && currentChainId === ARC_TESTNET_CHAIN_ID },
-  })
-
   // Pay flow
   const { writeContract: approve, data: approveHash, isPending: approvePending } = useWriteContract()
   const { writeContract: pay, data: payHash, isPending: payPending } = useWriteContract()
@@ -226,7 +211,6 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
       payHandledRef.current = true
       const challenge = pendingChallengeRef.current
       void Promise.resolve().then(async () => {
-        void refetchAccess()
         addLines(
           mkLine('[OK] On-chain payment transaction confirmed on Arc Mainnet.', 'output'),
           mkLine(`[TX] ${payHash}`, 'dim'),
@@ -276,7 +260,7 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
       })
     }
     if (!payConfirmed) payHandledRef.current = false
-  }, [payConfirmed, payHash, busy, address, signTypedDataAsync, refetchAccess, addLines])
+  }, [payConfirmed, payHash, busy, address, signTypedDataAsync, addLines])
 
   const processCommand = useCallback(
     async (cmd: string) => {
@@ -404,7 +388,6 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
 
         const svc = services[serviceIdx]
         setBusy(true)
-        setActiveServiceId(serviceIdx)
 
         await streamText(
           `[AGENT] Requesting authoritative HTTP 402 challenge from Gateway for Service #${svc.serviceId.toString()} ("${svc.name}")…`,
@@ -489,24 +472,11 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
           addLines(mkLine('[ERR] Connect your wallet to verify caller access on-chain.', 'error'))
           return
         }
-        setActiveServiceId(serviceIdx)
-        setTimeout(() => {
-          if (hasAccess) {
-            addLines(
-              mkLine(
-                `[INFO] On-chain verifyAccess(${serviceIdx}, ${address}) => true (historical contract flag; per-request Gateway HTTP 200 verification is still required to unlock API data).`,
-                'output'
-              )
-            )
-          } else {
-            addLines(
-              mkLine(
-                `[402] verifyAccess(${serviceIdx}, ${address}) => false (No historical payment recorded on-chain)`,
-                'error'
-              )
-            )
-          }
-        }, 180)
+        addLines(
+          mkLine('[INFO] PayGate402 on Arc Mainnet enforces stateless, replay-protected micropayments.', 'output'),
+          mkLine('[INFO] Access is granted per request via single-use requestIds and on-chain AccessGranted events.', 'output'),
+          mkLine(`[INFO] Run 'pay ${serviceIdx}' to generate a challenge ticket, settle on-chain, and unlock the payload.`, 'dim')
+        )
         return
       }
 
@@ -522,7 +492,6 @@ export function AgentCLI({ services: propServices, onNavigate }: AgentCLIProps) 
       services,
       usdcBalance,
       usdcAllowance,
-      hasAccess,
       publicClient,
       approve,
       pay,

@@ -47,7 +47,7 @@ export const PAYGATE402 = {
   abi: artifactV2.abi,
 } as const
 
-export const getContractConfig = (chainId?: number) => {
+export const getContractConfig = (chainId: number = ARC_MAINNET_CHAIN_ID) => {
   const net = getNetworkConfig(chainId)
   const isMainnet = net.chainId === ARC_MAINNET_CHAIN_ID
   const contractAddress = (net.contractAddress || PAYGATE402_MAINNET_ADDRESS) as `0x${string}`
