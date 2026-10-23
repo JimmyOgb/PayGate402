@@ -15,6 +15,7 @@
     "check": "bash scripts/check.sh",
     "contracts:build": "forge build",
     "contracts:test": "forge test",
+    "pregateway:start": "node scripts/ensure_artifacts.js",
     "gateway:start": "node src/gateway/index.ts",
     "gateway:mock": "node -e \"import('./src/gateway/index.ts').then(m => m.startGateway({ mockRpc: true }))\"",
     "test:gateway": "node test/gateway.test.ts"
@@ -27,6 +28,7 @@
     "@circle-fin/smart-contract-platform": "^10.8.0",
     "@circle-fin/user-controlled-wallets": "^10.8.0",
     "@circle-fin/w3s-pw-web-sdk": "^1.1.11",
+    "@libsql/client": "^0.18.0",
     "@openzeppelin/contracts": "5.1.0",
     "@tanstack/react-query": "^5.62.7",
     "@web3icons/react": "^4.0.0",

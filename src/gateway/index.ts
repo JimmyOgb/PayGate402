@@ -3,7 +3,7 @@
  * Starts the HTTP 402 reverse proxy with configurable RPC, database, and upstream adapters.
  * Implements strict multi-chain validation for Arc Testnet (5042002) and Arc Mainnet (5042).
  */
-import { GatewayDb } from './db.ts'
+import { createGatewayStore, sanitizeDatabaseUrl } from './db.ts'
 import { BlockchainVerifier, ViemRpcClient, type RpcClientInterface } from './verifier.ts'
 import { MockRpcClient } from './mockRpc.ts'
 import {
@@ -17,7 +17,6 @@ import {
   ARC_TESTNET_CHAIN_ID,
   ARC_MAINNET_CHAIN_ID,
   ARC_TESTNET_PAYGATE_CONTRACT,
-  ARC_MAINNET_PAYGATE_CONTRACT,
   ARC_TESTNET_RPC,
   ARC_MAINNET_RPC,
   USDC_TOKEN_ADDRESS,
@@ -88,6 +87,19 @@ export function resolveGatewayConfig(customConfig?: Partial<GatewayConfig>): Gat
 
   const port = customConfig?.port ?? Number(process.env.PORT || 4020)
   const dbPath = customConfig?.dbPath ?? process.env.DB_PATH ?? 'gateway.db'
+  const databaseUrl =
+    customConfig?.databaseUrl ??
+    customConfig?.remoteUrl ??
+    process.env.DATABASE_URL ??
+    process.env.TURSO_DATABASE_URL
+  const authToken =
+    customConfig?.authToken ??
+    process.env.TURSO_AUTH_TOKEN ??
+    process.env.DATABASE_AUTH_TOKEN
+  const remoteStore =
+    customConfig?.remoteStore ??
+    (Boolean(databaseUrl) || process.env.REMOTE_STORE === 'true')
+
   const minConfirmations = customConfig?.minConfirmations ?? Number(process.env.MIN_CONFIRMATIONS || 1)
   const upstreamMode =
     customConfig?.upstreamMode ??
@@ -101,6 +113,9 @@ export function resolveGatewayConfig(customConfig?: Partial<GatewayConfig>): Gat
   const rateLimitWindowMs = customConfig?.rateLimitWindowMs ?? Number(process.env.RATE_LIMIT_WINDOW_MS || 60000)
   const maxChallengesPerWindow =
     customConfig?.maxChallengesPerWindow ?? Number(process.env.MAX_CHALLENGES_PER_WINDOW || 60)
+  const gatewayTestSecret =
+    customConfig?.gatewayTestSecret ??
+    process.env.GATEWAY_TEST_SECRET
 
   return {
     port,
@@ -110,6 +125,11 @@ export function resolveGatewayConfig(customConfig?: Partial<GatewayConfig>): Gat
     minConfirmations,
     challengeTtlMs: 15 * 60 * 1000, // 15 minutes
     dbPath,
+    databaseUrl,
+    remoteUrl: databaseUrl,
+    authToken,
+    remoteStore,
+    gatewayTestSecret,
     rpcUrl,
     upstreamMode,
     maxBodySizeBytes,
@@ -120,10 +140,11 @@ export function resolveGatewayConfig(customConfig?: Partial<GatewayConfig>): Gat
   }
 }
 
-export function startGateway(customConfig?: Partial<GatewayConfig>) {
+export async function startGateway(customConfig?: Partial<GatewayConfig>) {
   const config = resolveGatewayConfig(customConfig)
 
-  const db = new GatewayDb(config.dbPath)
+  const db = createGatewayStore(config)
+  await db.init()
   const rpc: RpcClientInterface = config.mockRpc
     ? new MockRpcClient()
     : new ViemRpcClient(config.rpcUrl, config.contractAddress)
@@ -140,7 +161,7 @@ export function startGateway(customConfig?: Partial<GatewayConfig>) {
     upstream = new MockUpstreamAdapter()
   }
 
-  const server = createGatewayServer({
+  const server = await createGatewayServer({
     config,
     db,
     verifier,
@@ -153,6 +174,13 @@ export function startGateway(customConfig?: Partial<GatewayConfig>) {
       ? `\n  *** SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED ***\n  RPC Client:        Deterministic Mock RPC (Services 0 & 1)\n`
       : ''
     const networkName = config.chainId === ARC_MAINNET_CHAIN_ID ? 'Arc Mainnet' : 'Arc Testnet'
+    const isRemote = Boolean(config.remoteStore || config.databaseUrl || config.remoteUrl)
+    const dbDisplay = isRemote && (config.databaseUrl || config.remoteUrl)
+      ? `${sanitizeDatabaseUrl(config.databaseUrl || config.remoteUrl || '')} (libSQL Remote Store)`
+      : `${config.dbPath} (WAL Enabled)`
+    const archDisplay = isRemote
+      ? 'Multi-Instance / Remote libSQL (Turso Ready)'
+      : 'Single-Instance Embedded SQLite'
     process.stdout.write(`
 ======================================================
   PayGate402 Secure HTTP 402 Gateway Started${mockBanner}
@@ -163,10 +191,10 @@ export function startGateway(customConfig?: Partial<GatewayConfig>) {
   USDC Token:        ${config.usdcAddress}
   Min Confirmations: ${config.minConfirmations}
   Upstream Mode:     ${config.upstreamMode}
-  Database:          ${config.dbPath} (WAL Enabled)
+  Database:          ${dbDisplay}
   Max Body Size:     ${(config.maxBodySizeBytes ?? 1048576) / 1024 / 1024} MiB
   Rate Limit:        ${config.maxChallengesPerWindow ?? 60} challenges / ${(config.rateLimitWindowMs ?? 60000) / 1000}s
-  Architecture:      Single-Instance Embedded SQLite
+  Architecture:      ${archDisplay}
   Health Check:      http://localhost:${config.port}/health
   Protected Proxy:   http://localhost:${config.port}/v1/gateway/:serviceId/*
 ======================================================
@@ -182,12 +210,12 @@ export function startGateway(customConfig?: Partial<GatewayConfig>) {
       await new Promise<void>((resolve, reject) => {
         server.close(err => (err ? reject(err) : resolve()))
       })
-      db.close()
+      await db.close()
     },
   }
 }
 
 // Auto-start gateway if executed directly via Node.js
 if (process.argv[1] && (process.argv[1].endsWith('gateway/index.ts') || process.argv[1].endsWith('gateway\\index.ts'))) {
-  startGateway()
+  void startGateway()
 }

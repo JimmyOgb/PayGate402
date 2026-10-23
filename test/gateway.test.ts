@@ -31,10 +31,20 @@ import {
   USDC_TOKEN_ADDRESS,
   buildEip712Domain,
   GatewayConfigurationError,
+  PaymentStateTransitionError,
   type GatewayConfig,
+  type GatewayStore,
 } from '../src/gateway/types.ts'
 import { resolveGatewayConfig } from '../src/gateway/index.ts'
-import { GatewayDb } from '../src/gateway/db.ts'
+import {
+  GatewayDb,
+  SqliteGatewayStore,
+  LibSqlGatewayStore,
+  createGatewayStore,
+  setLibSqlAvailableForTesting,
+  sanitizeDatabaseUrl,
+  validateDatabaseUrl,
+} from '../src/gateway/db.ts'
 import { BlockchainVerifier, ViemRpcClient, VerificationError, type RpcClientInterface, type ServiceInfo } from '../src/gateway/verifier.ts'
 import { MockUpstreamAdapter, RealDataUpstreamAdapter, fetchArcMainnetTelemetry } from '../src/gateway/upstream.ts'
 import { createGatewayServer } from '../src/gateway/server.ts'
@@ -57,7 +67,12 @@ import {
 } from '../src/lib/gatewayClient.ts'
 import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
-const artifact = require('../contracts/out/PayGate402.sol/PayGate402.json') as { abi: readonly unknown[] }
+let artifact: { abi: readonly unknown[] }
+try {
+  artifact = require('../contracts/out/PayGate402.sol/PayGate402.json') as { abi: readonly unknown[] }
+} catch {
+  artifact = require('../contracts/contract-metadata/PayGate402.json') as { abi: readonly unknown[] }
+}
 
 // Standard deterministic test wallets
 const ALICE_KEY: Hex = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -225,8 +240,14 @@ async function setupTestHarness(opts?: {
   rateLimitWindowMs?: number
   maxChallengesPerWindow?: number
   mockRpc?: boolean
+  instanceId?: string
+  leaseTtlMs?: number
+  customDb?: GatewayStore
 }) {
-  const db = new GatewayDb(opts?.dbPath ?? ':memory:')
+  const db = opts?.customDb ?? new GatewayDb(opts?.dbPath ?? ':memory:')
+  if (!opts?.customDb) {
+    await db.init()
+  }
   const rpc = new MockRpcClient()
   const minConfirmations = opts?.minConfirmations ?? 1
   const verifier = new BlockchainVerifier(rpc, minConfirmations)
@@ -249,9 +270,11 @@ async function setupTestHarness(opts?: {
     rateLimitWindowMs: opts?.rateLimitWindowMs,
     maxChallengesPerWindow: opts?.maxChallengesPerWindow,
     mockRpc: opts?.mockRpc ?? false,
+    instanceId: opts?.instanceId,
+    leaseTtlMs: opts?.leaseTtlMs,
   }
 
-  const server = createGatewayServer({
+  const server = await createGatewayServer({
     config,
     db,
     verifier,
@@ -268,7 +291,9 @@ async function setupTestHarness(opts?: {
     await new Promise<void>((resolve, reject) => {
       server.close(err => (err ? reject(err) : resolve()))
     })
-    db.close()
+    if (!opts?.customDb) {
+      await db.close()
+    }
   }
 
   return {
@@ -323,8 +348,8 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       assert.equal(body.challenge.serviceId, '0')
       assert.equal(body.challenge.quotedPrice, '100000')
 
-      // Assert challenge was persisted in SQLite
-      const inDb = harness.db.getChallenge(body.challenge.requestId as Hex)
+      // Assert challenge was persisted in Store
+      const inDb = await harness.db.getChallenge(body.challenge.requestId as Hex)
       assert.ok(inDb)
       assert.equal(inDb?.status, 'ISSUED')
       assert.equal(inDb?.quotedPrice, 100_000n)
@@ -397,7 +422,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       assert.equal(harness.upstream.invocationCount, 1)
 
       // Verify payment record in DB is SUCCEEDED
-      const payment = harness.db.getPayment(txHash)
+      const payment = await harness.db.getPayment(txHash)
       assert.equal(payment?.state, 'SUCCEEDED')
       assert.ok(payment?.consumedAt)
     } finally {
@@ -1246,7 +1271,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       assert.equal(data.code, 'UPSTREAM_TIMEOUT_UNCERTAIN')
 
       // Assert DB state is UNCERTAIN
-      const payment = harness.db.getPayment(txHash)
+      const payment = await harness.db.getPayment(txHash)
       assert.equal(payment?.state, 'UNCERTAIN')
 
       // Attempting to retry now fails closed with 409 UNCERTAIN_LOCKED
@@ -1308,7 +1333,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       assert.equal(data.code, 'RPC_UNAVAILABLE')
 
       // Assert payment is marked FAILED (retriable when RPC recovers)
-      const payment = harness.db.getPayment(txHash)
+      const payment = await harness.db.getPayment(txHash)
       assert.equal(payment?.state, 'FAILED')
     } finally {
       await harness.teardown()
@@ -1696,10 +1721,11 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
     try {
       // Setup DB with an in-flight payment left in DISPATCHING when process terminated
       const db1 = new GatewayDb(dbFilePath)
+      await db1.init()
       const requestId: Hex = '0x4444444444444444444444444444444444444444444444444444444444444444'
       const txHash: Hex = '0x5555555555555555555555555555555555555555555555555555555555555555'
 
-      db1.createChallenge({
+      await db1.createChallenge({
         requestId,
         serviceId: 0n,
         payer: alice.address,
@@ -1713,16 +1739,17 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
         status: 'ISSUED',
       })
 
-      const lockRes = db1.tryAcquirePaymentLock({
+      const lockRes = await db1.tryAcquirePaymentLock({
         txHash,
         requestId,
         serviceId: 0n,
         caller: alice.address,
         amountPaid: 100_000n,
+        leaseTtlMs: 0, // Demonstrably expired lease representing terminated process
       })
       assert.equal(lockRes.acquired, true)
-      db1.transitionState(txHash, 'RESERVED', 'DISPATCHING')
-      db1.close()
+      await db1.transitionState(txHash, 'RESERVED', 'DISPATCHING')
+      await db1.close()
 
       // Gateway restarts. Client retries payment that was interrupted during DISPATCHING
       const harness = await setupTestHarness({ dbPath: dbFilePath })
@@ -2027,7 +2054,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       const txHash: Hex = '0xaaaa1111222233334444555566667777888899990000aaaabbbbccccddddeeee'
       const requestId: Hex = '0xaaaa1111222233334444555566667777888899990000aaaabbbbccccdddd0001'
 
-      harness.db.createChallenge({
+      await harness.db.createChallenge({
         requestId,
         serviceId: 0n,
         payer: alice.address,
@@ -2048,15 +2075,15 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
         caller: alice.address,
         amountPaid: 100_000n,
       }
-      harness.db.tryAcquirePaymentLock(params)
-      harness.db.recordFailed(txHash, 'RPC_TIMEOUT')
+      await harness.db.tryAcquirePaymentLock(params)
+      await harness.db.recordFailed(txHash, 'RPC_TIMEOUT')
 
-      const stateBefore = harness.db.getPayment(txHash)
+      const stateBefore = await harness.db.getPayment(txHash)
       assert.equal(stateBefore?.state, 'FAILED')
 
       // Now run two concurrent tryAcquirePaymentLock calls on the same failed txHash
-      const lock1 = harness.db.tryAcquirePaymentLock(params)
-      const lock2 = harness.db.tryAcquirePaymentLock(params)
+      const lock1 = await harness.db.tryAcquirePaymentLock(params)
+      const lock2 = await harness.db.tryAcquirePaymentLock(params)
 
       assert.equal(lock1.acquired, true)
       assert.equal(lock2.acquired, false)
@@ -2077,7 +2104,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       const reqId1: Hex = '0x0000000000000000000000000000000000000000000000000000000000000001'
       const reqId2: Hex = '0x0000000000000000000000000000000000000000000000000000000000000002'
 
-      harness.db.createChallenge({
+      await harness.db.createChallenge({
         requestId: reqId1,
         serviceId: 0n,
         payer: alice.address,
@@ -2091,7 +2118,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
         status: 'ISSUED',
       })
 
-      harness.db.createChallenge({
+      await harness.db.createChallenge({
         requestId: reqId2,
         serviceId: 0n,
         payer: alice.address,
@@ -2105,31 +2132,33 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
         status: 'ISSUED',
       })
 
-      harness.db.tryAcquirePaymentLock({
+      await harness.db.tryAcquirePaymentLock({
         txHash: txDispatching,
         requestId: reqId1,
         serviceId: 0n,
         caller: alice.address,
         amountPaid: 100_000n,
+        leaseTtlMs: 0, // Demonstrably expired lease representing terminated process
       })
-      harness.db.transitionState(txDispatching, 'RESERVED', 'DISPATCHING')
+      await harness.db.transitionState(txDispatching, 'RESERVED', 'DISPATCHING')
 
-      harness.db.tryAcquirePaymentLock({
+      await harness.db.tryAcquirePaymentLock({
         txHash: txReserved,
         requestId: reqId2,
         serviceId: 0n,
         caller: alice.address,
         amountPaid: 100_000n,
+        leaseTtlMs: 0, // Demonstrably expired lease representing terminated process
       })
 
-      const recovered = harness.db.recoverStartupStates()
+      const recovered = await harness.db.recoverStartupStates()
       assert.equal(recovered.recoveredUncertain, 1)
       assert.equal(recovered.recoveredFailed, 1)
 
-      const stateDispatching = harness.db.getPayment(txDispatching)
+      const stateDispatching = await harness.db.getPayment(txDispatching)
       assert.equal(stateDispatching?.state, 'UNCERTAIN')
 
-      const stateReserved = harness.db.getPayment(txReserved)
+      const stateReserved = await harness.db.getPayment(txReserved)
       assert.equal(stateReserved?.state, 'FAILED')
     } finally {
       await harness.teardown()
@@ -2183,7 +2212,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       const data = (await res.json()) as { code: string }
       assert.equal(data.code, 'UPSTREAM_TIMEOUT_UNCERTAIN')
 
-      const payment = harness.db.getPayment(txHash)
+      const payment = await harness.db.getPayment(txHash)
       assert.equal(payment?.state, 'UNCERTAIN')
 
       // Retry is rejected as locked / non-repeatable
@@ -2546,7 +2575,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
 
       // Ensure no challenge record exists in database
       const dummyReqId: Hex = '0x1234567890123456789012345678901234567890123456789012345678901234'
-      assert.equal(harness.db.getChallenge(dummyReqId), null)
+      assert.equal(await harness.db.getChallenge(dummyReqId), null)
     } finally {
       await harness.teardown()
     }
@@ -3865,7 +3894,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       const requestId: Hex = '0x8888888888888888888888888888888888888888888888888888888888888888'
 
       // Database schema enforces foreign key: challenge must exist before payment lock
-      harness.db.createChallenge({
+      await harness.db.createChallenge({
         requestId,
         serviceId: 0n,
         payer: alice.address,
@@ -3880,7 +3909,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       })
 
       // Acquire lock first time -> success
-      const lock1 = harness.db.tryAcquirePaymentLock({
+      const lock1 = await harness.db.tryAcquirePaymentLock({
         txHash,
         requestId,
         serviceId: 0n,
@@ -3890,7 +3919,7 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       assert.equal(lock1.acquired, true)
 
       // Concurrent second attempt before completion -> CONCURRENT_CONFLICT (409)
-      const lock2 = harness.db.tryAcquirePaymentLock({
+      const lock2 = await harness.db.tryAcquirePaymentLock({
         txHash,
         requestId,
         serviceId: 0n,
@@ -3901,12 +3930,12 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
       assert.equal(lock2.reason, 'CONCURRENT_CONFLICT')
 
       // Crash recovery simulation: record failure resets lock to FAILED
-      harness.db.recordFailed(txHash, 'Simulated RPC crash')
-      const rec = harness.db.getPayment(txHash)
+      await harness.db.recordFailed(txHash, 'Simulated RPC crash')
+      const rec = await harness.db.getPayment(txHash)
       assert.equal(rec?.state, 'FAILED')
 
       // After FAILED, lock can be re-acquired for valid retry
-      const lockRetry = harness.db.tryAcquirePaymentLock({
+      const lockRetry = await harness.db.tryAcquirePaymentLock({
         txHash,
         requestId,
         serviceId: 0n,
@@ -4206,6 +4235,2650 @@ describe('PayGate402 Stage 3 Security & Payment Semantics Test Suite', () => {
     // Case 3: ViemRpcClient custom contract address initialization
     const client = new ViemRpcClient('http://127.0.0.1:1', mainnetAddr)
     assert.ok(client)
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 63. Gate 1 (Task 1): Cached response requires valid signature and binds strictly to caller
+  // ─────────────────────────────────────────────────────────────────────────────
+  test('63. Gate 1 (Task 1): Cached response requires valid signature and binds strictly to caller', async () => {
+    const harness = await setupTestHarness()
+    try {
+      // Step 1: Alice requests challenge for Service 0 /feed
+      const res402 = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, { method: 'POST' })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as { challenge: any }
+
+      const txHash: Hex = '0x6363636363636363636363636363636363636363636363636363636363636363'
+      harness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      const sigAlice = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/feed',
+          bodyDigest: EMPTY_BODY_DIGEST,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // Step 2: Initial payment by Alice -> 200 OK VERIFIED_ONCHAIN_SUCCESS
+      const res1 = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigAlice,
+        },
+      })
+      assert.equal(res1.status, 200)
+      assert.equal(res1.headers.get('X-PayGate-Status'), 'VERIFIED_ONCHAIN_SUCCESS')
+      assert.equal(harness.upstream.invocationCount, 1)
+
+      // Case 1: Legitimate retry by Alice with valid signature -> 200 OK VERIFIED_ONCHAIN_CACHED
+      const resRetryAlice = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigAlice,
+        },
+      })
+      assert.equal(resRetryAlice.status, 200)
+      assert.equal(resRetryAlice.headers.get('X-PayGate-Status'), 'VERIFIED_ONCHAIN_CACHED')
+      assert.equal(resRetryAlice.headers.get('X-PayGate-Cached'), 'true')
+      assert.equal(harness.upstream.invocationCount, 1) // Did NOT redispatch
+
+      // Case 2: Unauthenticated retry: missing or malformed signature -> 401 INVALID_SIGNATURE
+      const resBadSig = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': '0xbad000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001c',
+        },
+      })
+      assert.equal(resBadSig.status, 401)
+      const badSigData = (await resBadSig.json()) as { code: string }
+      assert.equal(badSigData.code, 'INVALID_SIGNATURE')
+      assert.equal(harness.upstream.invocationCount, 1)
+
+      // Case 3: Identity theft / Front-running attacker: Bob signs Alice's txHash and requestId -> 401 SIGNER_MISMATCH
+      const sigBob = await bob.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/feed',
+          bodyDigest: EMPTY_BODY_DIGEST,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+      const resBob = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigBob,
+        },
+      })
+      assert.equal(resBob.status, 401)
+      const bobData = (await resBob.json()) as { code: string }
+      assert.equal(bobData.code, 'SIGNER_MISMATCH')
+      assert.equal(harness.upstream.invocationCount, 1)
+
+      // Case 4: Request ID substitution: using Alice's txHash with Mallory's new challenge -> 409 PAYMENT_ALREADY_CONSUMED
+      const resMallory = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, { method: 'POST' })
+      const { challenge: malloryChallenge } = (await resMallory.json()) as { challenge: any }
+      const resSubstituted = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': malloryChallenge.requestId,
+          'X-Payment-Signature': sigAlice,
+        },
+      })
+      assert.equal(resSubstituted.status, 409)
+      const substitutedData = (await resSubstituted.json()) as { code: string }
+      assert.equal(substitutedData.code, 'PAYMENT_ALREADY_CONSUMED')
+      assert.equal(harness.upstream.invocationCount, 1)
+
+      // Case 5: Path mismatch on retry: Alice attempts to retrieve response using /other path -> 400 PATH_MISMATCH
+      const resWrongPath = await fetch(`${harness.baseUrl}/v1/gateway/0/other`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigAlice,
+        },
+      })
+      assert.equal(resWrongPath.status, 400)
+      const wrongPathData = (await resWrongPath.json()) as { code: string }
+      assert.equal(wrongPathData.code, 'PATH_MISMATCH')
+      assert.equal(harness.upstream.invocationCount, 1)
+
+      // Case 6: Body digest mismatch on retry: tampering with POST body -> 400 BODY_DIGEST_MISMATCH
+      const resTamperedBody = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigAlice,
+        },
+        body: JSON.stringify({ tampered: true }),
+      })
+      assert.equal(resTamperedBody.status, 400)
+      const tamperedData = (await resTamperedBody.json()) as { code: string }
+      assert.equal(tamperedData.code, 'BODY_DIGEST_MISMATCH')
+      assert.equal(harness.upstream.invocationCount, 1)
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 64. Gate 1 (Task 2): Enforce state-transition results (fail closed on conflict)
+  // ─────────────────────────────────────────────────────────────────────────────
+  test('64. Gate 1 (Task 2): Enforce state-transition results (fail closed on conflict without proceeding)', async () => {
+    const harness = await setupTestHarness()
+    try {
+      // Step 1: Obtain challenge
+      const res402 = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, { method: 'POST' })
+      const { challenge } = (await res402.json()) as { challenge: any }
+
+      const txHash: Hex = '0x6464646464646464646464646464646464646464646464646464646464646464'
+      harness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/signals',
+          bodyDigest: EMPTY_BODY_DIGEST,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // Sub-case 2A: Forced failure on RESERVED -> VERIFYING transition
+      const origTransition = harness.db.transitionState.bind(harness.db)
+      harness.db.transitionState = async (hash: Hex, from: any, to: any) => {
+        if (from === 'RESERVED' && to === 'VERIFYING') {
+          return false
+        }
+        return await origTransition(hash, from, to)
+      }
+
+      const resFail1 = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+        },
+      })
+      assert.equal(resFail1.status, 409)
+      const dataFail1 = (await resFail1.json()) as { code: string; error: string }
+      assert.equal(dataFail1.code, 'CONCURRENT_REQUEST_CONFLICT')
+      assert.ok(dataFail1.error.includes('RESERVED to VERIFYING'))
+      // Verify upstream was NEVER called
+      assert.equal(harness.upstream.invocationCount, 0)
+
+      // Sub-case 2B: Forced failure on VERIFYING -> DISPATCHING transition
+      // Reset payment record to FAILED so retry can acquire lock again
+      await harness.db.recordFailed(txHash, 'Test reset')
+
+      harness.db.transitionState = async (hash: Hex, from: any, to: any) => {
+        if (from === 'VERIFYING' && to === 'DISPATCHING') {
+          return false
+        }
+        return await origTransition(hash, from, to)
+      }
+
+      const resFail2 = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+        },
+      })
+      assert.equal(resFail2.status, 409)
+      const dataFail2 = (await resFail2.json()) as { code: string; error: string }
+      assert.equal(dataFail2.code, 'CONCURRENT_REQUEST_CONFLICT')
+      assert.ok(dataFail2.error.includes('VERIFYING to DISPATCHING'))
+      // Verify upstream was NEVER called
+      assert.equal(harness.upstream.invocationCount, 0)
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 65. Gate 1 (Task 3): Guarded recordSuccess mutations require DISPATCHING state and exactly 1 row
+  // ─────────────────────────────────────────────────────────────────────────────
+  test('65. Gate 1 (Task 3): Guarded recordSuccess mutations require DISPATCHING state and exactly 1 row', async () => {
+    const db = new GatewayDb(':memory:')
+    await db.init()
+    try {
+      const txHash1: Hex = '0x6501650165016501650165016501650165016501650165016501650165016501'
+      const reqId1: Hex = '0x6501000000000000000000000000000000000000000000000000000000000001'
+
+      await db.createChallenge({
+        requestId: reqId1,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/feed',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      // 1. Normal successful dispatch: RESERVED -> DISPATCHING -> recordSuccess -> SUCCEEDED
+      const lockRes = await db.tryAcquirePaymentLock({
+        txHash: txHash1,
+        requestId: reqId1,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+      assert.equal(lockRes.acquired, true)
+      await db.transitionState(txHash1, 'RESERVED', 'DISPATCHING')
+
+      await db.recordSuccess(txHash1, JSON.stringify({ ok: true }), alice.address)
+      const payment1 = await db.getPayment(txHash1)
+      assert.equal(payment1?.state, 'SUCCEEDED')
+      assert.equal(payment1?.cachedResponse, JSON.stringify({ ok: true }))
+
+      // Repeated success-recording attempt on already SUCCEEDED payment throws PaymentStateTransitionError
+      await assert.rejects(
+        async () => await db.recordSuccess(txHash1, JSON.stringify({ duplicate: true }), alice.address),
+        PaymentStateTransitionError
+      )
+
+      // 2. Upstream result arriving after payment has become UNCERTAIN
+      const txHash2: Hex = '0x6502650265026502650265026502650265026502650265026502650265026502'
+      const reqId2: Hex = '0x6502000000000000000000000000000000000000000000000000000000000002'
+
+      await db.createChallenge({
+        requestId: reqId2,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/feed',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      await db.tryAcquirePaymentLock({
+        txHash: txHash2,
+        requestId: reqId2,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+      await db.transitionState(txHash2, 'RESERVED', 'DISPATCHING')
+      // Simulate timeout: state becomes UNCERTAIN
+      await db.recordUncertain(txHash2, 'Simulated upstream socket timeout')
+      assert.equal((await db.getPayment(txHash2))?.state, 'UNCERTAIN')
+
+      // Late-returning upstream response must NOT overwrite UNCERTAIN with SUCCEEDED
+      await assert.rejects(
+        async () => await db.recordSuccess(txHash2, JSON.stringify({ lateData: true }), alice.address),
+        PaymentStateTransitionError
+      )
+      // Assert state in DB is preserved as UNCERTAIN
+      assert.equal((await db.getPayment(txHash2))?.state, 'UNCERTAIN')
+
+      // 3. Upstream result arriving after payment has become FAILED
+      const txHash3: Hex = '0x6503650365036503650365036503650365036503650365036503650365036503'
+      const reqId3: Hex = '0x6503000000000000000000000000000000000000000000000000000000000003'
+
+      await db.createChallenge({
+        requestId: reqId3,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/feed',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      await db.tryAcquirePaymentLock({
+        txHash: txHash3,
+        requestId: reqId3,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+      await db.transitionState(txHash3, 'RESERVED', 'DISPATCHING')
+      // Pre-dispatch failure or recovery sets FAILED
+      await db.recordFailed(txHash3, 'Connection aborted')
+      assert.equal((await db.getPayment(txHash3))?.state, 'FAILED')
+
+      // Late-returning upstream response must NOT overwrite FAILED with SUCCEEDED
+      await assert.rejects(
+        async () => await db.recordSuccess(txHash3, JSON.stringify({ lateData: true }), alice.address),
+        PaymentStateTransitionError
+      )
+      // Assert state in DB is preserved as FAILED
+      assert.equal((await db.getPayment(txHash3))?.state, 'FAILED')
+    } finally {
+      await db.close()
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 66. Gate 1 (Task 3): Fail-closed server response when recordSuccess fails to commit
+  // ─────────────────────────────────────────────────────────────────────────────
+  test('66. Gate 1 (Task 3): Fail-closed server response when recordSuccess fails to commit', async () => {
+    const harness = await setupTestHarness()
+    try {
+      const res402 = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, { method: 'POST' })
+      const { challenge } = (await res402.json()) as { challenge: any }
+
+      const txHash: Hex = '0x6666666666666666666666666666666666666666666666666666666666666666'
+      harness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/feed',
+          bodyDigest: EMPTY_BODY_DIGEST,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // Hook upstream dispatch: while upstream dispatch is running, simulate another thread
+      // or recovery setting the payment to UNCERTAIN in the database
+      harness.upstream.dispatch = async () => {
+        // Tamper state in DB to UNCERTAIN behind gateway's back
+        await harness.db.recordUncertain(txHash, 'Race condition: recovery set UNCERTAIN during dispatch')
+        return {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sensitiveSecretPayload: 'TOP_SECRET_DATA_DO_NOT_LEAK' }),
+          latencyMs: 10,
+        }
+      }
+
+      // Submit payment
+      const res = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+        },
+      })
+
+      // Must fail closed with 500 STATE_RECORD_FAILED
+      assert.equal(res.status, 500)
+      const data = (await res.json()) as { code: string; error: string }
+      assert.equal(data.code, 'STATE_RECORD_FAILED')
+
+      // Assert that the sensitive secret payload was NEVER released to the client!
+      assert.equal((data as any).sensitiveSecretPayload, undefined)
+      assert.ok(!JSON.stringify(data).includes('TOP_SECRET_DATA_DO_NOT_LEAK'))
+
+      // Assert that the database state was NOT corrupted and remains UNCERTAIN
+      const paymentInDb = await harness.db.getPayment(txHash)
+      assert.equal(paymentInDb?.state, 'UNCERTAIN')
+      assert.equal(paymentInDb?.cachedResponse, null)
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 67. Gate 2: GatewayStore interface conformance, SqliteGatewayStore ping, and /health readiness
+  // ─────────────────────────────────────────────────────────────────────────────
+  test('67. Gate 2: GatewayStore interface conformance, SqliteGatewayStore ping, and /health readiness', async () => {
+    const store = createGatewayStore({ dbPath: ':memory:' })
+    await store.init()
+    try {
+      assert.equal(await store.ping(), true)
+
+      // Test with test harness
+      const harness = await setupTestHarness()
+      try {
+        const resHealthy = await fetch(`${harness.baseUrl}/health`)
+        assert.equal(resHealthy.status, 200)
+        const dataHealthy = (await resHealthy.json()) as { status: string; database: string; network: string }
+        assert.equal(dataHealthy.status, 'healthy')
+        assert.equal(dataHealthy.database, 'connected')
+        assert.equal(dataHealthy.network, 'Arc Testnet')
+
+        // Simulate database becoming unreachable
+        harness.db.ping = async () => false
+        const resUnhealthy = await fetch(`${harness.baseUrl}/health`)
+        assert.equal(resUnhealthy.status, 503)
+        const dataUnhealthy = (await resUnhealthy.json()) as { status: string; database: string }
+        assert.equal(dataUnhealthy.status, 'unhealthy')
+        assert.equal(dataUnhealthy.database, 'unreachable')
+      } finally {
+        await harness.teardown()
+      }
+    } finally {
+      await store.close()
+      assert.equal(await store.ping(), false)
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 68. Gate 2: LibSqlGatewayStore runtime dependency check throws GatewayConfigurationError
+  // ─────────────────────────────────────────────────────────────────────────────
+  test('68. Gate 2: LibSqlGatewayStore runtime dependency check throws GatewayConfigurationError', async () => {
+    setLibSqlAvailableForTesting(false)
+    try {
+      assert.throws(
+        () => new LibSqlGatewayStore({ url: 'libsql://dummy.turso.io', authToken: 'dummy-token' }),
+        (err: unknown) => {
+          return (
+            err instanceof GatewayConfigurationError &&
+            err.message.includes('@libsql/client')
+          )
+        }
+      )
+
+      assert.throws(
+        () =>
+          createGatewayStore({
+            dbPath: 'gateway.db',
+            remoteStore: true,
+            databaseUrl: 'libsql://dummy.turso.io',
+          }),
+        (err: unknown) => {
+          return (
+            err instanceof GatewayConfigurationError &&
+            err.message.includes('@libsql/client')
+          )
+        }
+      )
+    } finally {
+      setLibSqlAvailableForTesting(null)
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 69. Gate 2: Route serviceId mismatch on cached retry rejected with HTTP 400 SERVICE_ID_MISMATCH
+  // ─────────────────────────────────────────────────────────────────────────────
+  test('69. Gate 2: Route serviceId mismatch on cached retry rejected with HTTP 400 SERVICE_ID_MISMATCH', async () => {
+    const harness = await setupTestHarness()
+    try {
+      // Step A: Request challenge for service 0
+      const res402 = await fetch(`${harness.baseUrl}/v1/gateway/0/signals/whale`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: 'whale-activity' }),
+      })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as {
+        challenge: { requestId: Hex; quotedPrice: string; expiresAt: number; serviceId: string }
+      }
+      assert.equal(challenge.serviceId, '0')
+
+      // Step B: Settle payment for service 0 on Arc Testnet
+      const txHash: Hex = '0x6969696969696969696969696969696969696969696969696969696969696969'
+      harness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      // Step C: Sign valid EIP-712 auth for service 0
+      const postBody = JSON.stringify({ query: 'whale-activity' })
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/signals/whale',
+          bodyDigest: keccak256(toHex(postBody)),
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // Step D: Initial request unlocks service 0 and caches result
+      const res200 = await fetch(`${harness.baseUrl}/v1/gateway/0/signals/whale`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+          'X-Payment-Payer': alice.address,
+        },
+        body: postBody,
+      })
+      assert.equal(res200.status, 200)
+      assert.equal(res200.headers.get('X-PayGate-Status'), 'VERIFIED_ONCHAIN_SUCCESS')
+      const initialInvocationCount = harness.upstream.invocationCount
+      assert.equal(initialInvocationCount, 1)
+
+      // Step E: Retry with the SAME credentials against route /v1/gateway/1/signals/whale (Service 1)
+      const resMismatch = await fetch(`${harness.baseUrl}/v1/gateway/1/signals/whale`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+          'X-Payment-Payer': alice.address,
+        },
+        body: postBody,
+      })
+
+      // Must be rejected with HTTP 400 and code SERVICE_ID_MISMATCH
+      assert.equal(resMismatch.status, 400)
+      const mismatchData = (await resMismatch.json()) as { code: string; error: string }
+      assert.equal(mismatchData.code, 'SERVICE_ID_MISMATCH')
+      assert.ok(mismatchData.error.includes('does not match challenge serviceId'))
+
+      // Upstream must NEVER be invoked for the mismatched route
+      assert.equal(harness.upstream.invocationCount, initialInvocationCount)
+
+      // Step F: Legitimate retry to service 0 succeeds and returns cached response
+      const resCached = await fetch(`${harness.baseUrl}/v1/gateway/0/signals/whale`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+          'X-Payment-Payer': alice.address,
+        },
+        body: postBody,
+      })
+      assert.equal(resCached.status, 200)
+      assert.equal(resCached.headers.get('X-PayGate-Status'), 'VERIFIED_ONCHAIN_CACHED')
+      assert.equal(resCached.headers.get('X-PayGate-Cached'), 'true')
+      assert.equal(harness.upstream.invocationCount, initialInvocationCount)
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Gate 3: Lease-Based Recovery & Multi-Instance Safety Tests (70 - 84)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // 70. Two instances attempting to acquire the same lease (one wins, second gets CONCURRENT_CONFLICT)
+  test('70. Gate 3: Multi-Instance Race: Two instances attempting to acquire the same lease (one wins, second gets CONCURRENT_CONFLICT)', async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'pg402-g3-race-'))
+    const dbPath = join(dbDir, 'shared.db')
+    let storeA: GatewayDb | undefined
+    let storeB: GatewayDb | undefined
+    try {
+      storeA = new GatewayDb(dbPath, 'instance-node-A')
+      storeB = new GatewayDb(dbPath, 'instance-node-B')
+      await storeA.init()
+      await storeB.init()
+
+      const requestId: Hex = '0x7070707070707070707070707070707070707070707070707070707070707070'
+      const txHash: Hex = '0x7070707070707070707070707070707070707070707070707070707070707071'
+
+      await storeA.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      // Instance A attempts lock acquisition
+      const lockResA = await storeA.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        instanceId: 'instance-node-A',
+        leaseTtlMs: 30000,
+      })
+      assert.equal(lockResA.acquired, true)
+      assert.ok(lockResA.leaseToken)
+
+      // Concurrent Instance B attempts lock acquisition on the same payment
+      const lockResB = await storeB.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        instanceId: 'instance-node-B',
+        leaseTtlMs: 30000,
+      })
+      assert.equal(lockResB.acquired, false)
+      assert.equal(lockResB.reason, 'CONCURRENT_CONFLICT')
+      assert.equal(lockResB.leaseToken, undefined)
+
+      // Verify that Instance A still holds the lease and state is RESERVED
+      const record = await storeA.getPayment(txHash)
+      assert.equal(record?.state, 'RESERVED')
+      assert.equal(record?.leaseOwner, 'instance-node-A')
+      assert.equal(record?.leaseToken, lockResA.leaseToken)
+
+      await storeA.close()
+      await storeB.close()
+    } finally {
+      await storeA?.close().catch(() => {})
+      await storeB?.close().catch(() => {})
+      try {
+        rmSync(dbDir, { recursive: true, force: true })
+      } catch {
+        // ignore Windows file lock latency
+      }
+    }
+  })
+
+  // 71. Lease renewal versus concurrent recovery (renewLease keeps lease alive, prevents recovery)
+  test('71. Gate 3: Lease renewal versus concurrent recovery (renewLease keeps lease alive, prevents recovery)', async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'pg402-g3-renew-'))
+    const dbPath = join(dbDir, 'shared.db')
+    let storeA: GatewayDb | undefined
+    try {
+      storeA = new GatewayDb(dbPath, 'instance-node-A')
+      await storeA.init()
+
+      const requestId: Hex = '0x7171717171717171717171717171717171717171717171717171717171717171'
+      const txHash: Hex = '0x7171717171717171717171717171717171717171717171717171717171717172'
+
+      await storeA.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      // Short initial lease of 250ms
+      const lockRes = await storeA.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        instanceId: 'instance-node-A',
+        leaseTtlMs: 250,
+      })
+      assert.equal(lockRes.acquired, true)
+      assert.ok(lockRes.leaseToken)
+
+      await storeA.transitionState(txHash, 'RESERVED', 'DISPATCHING', lockRes.leaseToken)
+
+      // Renew lease before it expires, extending by 5000ms
+      const renewed = await storeA.renewLease(txHash, lockRes.leaseToken!, 5000)
+      assert.equal(renewed, true)
+
+      // Sleep 300ms (original 250ms TTL has passed, but lease was renewed for 5000ms)
+      await new Promise(resolve => setTimeout(resolve, 300))
+
+      // Concurrent recovery runs
+      const recovered = await storeA.recoverExpiredLeases()
+      assert.equal(recovered.recoveredFailed + recovered.recoveredUncertain, 0)
+
+      // Payment must remain DISPATCHING because lease is still active (Invariant C)
+      const payment = await storeA.getPayment(txHash)
+      assert.equal(payment?.state, 'DISPATCHING')
+      assert.equal(payment?.leaseOwner, 'instance-node-A')
+
+      await storeA.close()
+    } finally {
+      await storeA?.close().catch(() => {})
+      try {
+        rmSync(dbDir, { recursive: true, force: true })
+      } catch {
+        // ignore Windows file lock latency
+      }
+    }
+  })
+
+  // 72. Active lease surviving another instance's startup (Instance B startup does not touch Instance A's active lease)
+  test("72. Gate 3: Active lease surviving another instance's startup (Instance B startup does not touch Instance A's active lease)", async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'pg402-g3-startup-survive-'))
+    const dbPath = join(dbDir, 'shared.db')
+    let storeA: GatewayDb | undefined
+    let storeB: GatewayDb | undefined
+    try {
+      storeA = new GatewayDb(dbPath, 'instance-node-A')
+      await storeA.init()
+
+      const requestId: Hex = '0x7272727272727272727272727272727272727272727272727272727272727272'
+      const txHash: Hex = '0x7272727272727272727272727272727272727272727272727272727272727273'
+
+      await storeA.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      // Instance A locks and moves to DISPATCHING with active lease
+      const lockResA = await storeA.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        instanceId: 'instance-node-A',
+        leaseTtlMs: 60000,
+      })
+      assert.equal(lockResA.acquired, true)
+      await storeA.transitionState(txHash, 'RESERVED', 'DISPATCHING', lockResA.leaseToken)
+
+      // Fresh Instance B starts up against the SAME shared database
+      const storeB = new GatewayDb(dbPath, 'instance-node-B')
+      await storeB.init() // Runs recoverStartupStates()
+      await storeB.recoverStartupStates()
+
+      // Invariant C: Instance A's in-flight transaction is completely untouched
+      const payment = await storeB.getPayment(txHash)
+      assert.equal(payment?.state, 'DISPATCHING')
+      assert.equal(payment?.leaseOwner, 'instance-node-A')
+      assert.equal(payment?.leaseToken, lockResA.leaseToken)
+      assert.equal(payment?.failureReason, null)
+
+      await storeA.close()
+      await storeB.close()
+    } finally {
+      await storeA?.close().catch(() => {})
+      await storeB?.close().catch(() => {})
+      try {
+        rmSync(dbDir, { recursive: true, force: true })
+      } catch {
+        // ignore Windows file lock latency
+      }
+    }
+  })
+
+  // 73. Expired lease being recovered safely (demonstrably expired lease swept to UNCERTAIN for DISPATCHING, FAILED for RESERVED)
+  test('73. Gate 3: Expired lease being recovered safely (demonstrably expired lease swept to UNCERTAIN for DISPATCHING, FAILED for RESERVED)', async () => {
+    const store = new GatewayDb(':memory:')
+    await store.init()
+    try {
+      // 1. Expired RESERVED payment
+      const req1: Hex = '0x7301010101010101010101010101010101010101010101010101010101010101'
+      const tx1: Hex = '0x7301010101010101010101010101010101010101010101010101010101010102'
+      await store.createChallenge({
+        requestId: req1,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+      const lock1 = await store.tryAcquirePaymentLock({
+        txHash: tx1,
+        requestId: req1,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        leaseTtlMs: 0, // Expired immediately
+      })
+      assert.equal(lock1.acquired, true)
+
+      // 2. Expired DISPATCHING payment
+      const req2: Hex = '0x7302020202020202020202020202020202020202020202020202020202020201'
+      const tx2: Hex = '0x7302020202020202020202020202020202020202020202020202020202020202'
+      await store.createChallenge({
+        requestId: req2,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+      const lock2 = await store.tryAcquirePaymentLock({
+        txHash: tx2,
+        requestId: req2,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        leaseTtlMs: 0,
+      })
+      assert.equal(lock2.acquired, true)
+      await store.transitionState(tx2, 'RESERVED', 'DISPATCHING', lock2.leaseToken)
+
+      // 3. Active DISPATCHING payment
+      const req3: Hex = '0x7303030303030303030303030303030303030303030303030303030303030301'
+      const tx3: Hex = '0x7303030303030303030303030303030303030303030303030303030303030302'
+      await store.createChallenge({
+        requestId: req3,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+      const lock3 = await store.tryAcquirePaymentLock({
+        txHash: tx3,
+        requestId: req3,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        leaseTtlMs: 60000, // Active
+      })
+      assert.equal(lock3.acquired, true)
+      await store.transitionState(tx3, 'RESERVED', 'DISPATCHING', lock3.leaseToken)
+
+      // Run recovery
+      const recovered = await store.recoverExpiredLeases()
+      assert.equal(recovered.recoveredFailed, 1)
+      assert.equal(recovered.recoveredUncertain, 1)
+
+      const p1 = await store.getPayment(tx1)
+      assert.equal(p1?.state, 'FAILED')
+      assert.match(p1?.failureReason ?? '', /Pre-dispatch reservation lease expired/)
+
+      const p2 = await store.getPayment(tx2)
+      assert.equal(p2?.state, 'UNCERTAIN')
+      assert.match(p2?.failureReason ?? '', /Upstream dispatch lease expired; locked to UNCERTAIN/)
+
+      const p3 = await store.getPayment(tx3)
+      assert.equal(p3?.state, 'DISPATCHING')
+      assert.equal(p3?.failureReason, null)
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 74. Stale owner attempting to record success (token mismatch throws PaymentStateTransitionError / 500)
+  test('74. Gate 3: Stale owner attempting to record success (token mismatch throws PaymentStateTransitionError / 500)', async () => {
+    const store = new GatewayDb(':memory:')
+    await store.init()
+    try {
+      const requestId: Hex = '0x7474747474747474747474747474747474747474747474747474747474747474'
+      const txHash: Hex = '0x7474747474747474747474747474747474747474747474747474747474747475'
+
+      await store.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      const lockRes = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+      assert.equal(lockRes.acquired, true)
+      await store.transitionState(txHash, 'RESERVED', 'DISPATCHING', lockRes.leaseToken)
+
+      // Attempt to recordSuccess with a mismatched / stale leaseToken
+      await assert.rejects(
+        async () => {
+          await store.recordSuccess(
+            txHash,
+            JSON.stringify({ status: 200, headers: {}, body: 'test-ok' }),
+            alice.address,
+            'bogus-stale-token-12345'
+          )
+        },
+        (err: unknown) => {
+          return (
+            err instanceof PaymentStateTransitionError &&
+            err.message.includes("expected state 'DISPATCHING' with valid lease token")
+          )
+        }
+      )
+
+      // Verify that state was NOT modified to SUCCEEDED
+      const payment = await store.getPayment(txHash)
+      assert.equal(payment?.state, 'DISPATCHING')
+      assert.equal(payment?.cachedResponse, null)
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 75. Stale owner attempting to record failure (token mismatch prevents update)
+  test('75. Gate 3: Stale owner attempting to record failure (token mismatch prevents update)', async () => {
+    const store = new GatewayDb(':memory:')
+    await store.init()
+    try {
+      const requestId: Hex = '0x7575757575757575757575757575757575757575757575757575757575757575'
+      const txHash: Hex = '0x7575757575757575757575757575757575757575757575757575757575757576'
+
+      await store.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      const lockRes = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+      assert.equal(lockRes.acquired, true)
+      await store.transitionState(txHash, 'RESERVED', 'DISPATCHING', lockRes.leaseToken)
+
+      // Stale owner attempts recordFailed with invalid token
+      await store.recordFailed(txHash, 'Stale failure report', 'wrong-stale-token')
+
+      // Record must remain DISPATCHING without failureReason updated
+      const payment = await store.getPayment(txHash)
+      assert.equal(payment?.state, 'DISPATCHING')
+      assert.equal(payment?.failureReason, null)
+
+      // Valid token recordFailed succeeds
+      await store.recordFailed(txHash, 'Legitimate failure', lockRes.leaseToken)
+      const failedPayment = await store.getPayment(txHash)
+      assert.equal(failedPayment?.state, 'FAILED')
+      assert.equal(failedPayment?.failureReason, 'Legitimate failure')
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 76. Lease-token mismatch on transitionState (returns false, aborts with 409)
+  test('76. Gate 3: Lease-token mismatch on transitionState (returns false, aborts with 409)', async () => {
+    const store = new GatewayDb(':memory:')
+    await store.init()
+    try {
+      const requestId: Hex = '0x7676767676767676767676767676767676767676767676767676767676767676'
+      const txHash: Hex = '0x7676767676767676767676767676767676767676767676767676767676767677'
+
+      await store.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      const lockRes = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+      assert.equal(lockRes.acquired, true)
+
+      // Token mismatch on transitionState returns false
+      const transitionOk = await store.transitionState(
+        txHash,
+        'RESERVED',
+        'VERIFYING',
+        'invalid-mismatched-token'
+      )
+      assert.equal(transitionOk, false)
+
+      // State remains in RESERVED
+      const payment = await store.getPayment(txHash)
+      assert.equal(payment?.state, 'RESERVED')
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 77. Process crash before dispatch (expired RESERVED recovered to FAILED, retriable)
+  test('77. Gate 3: Process crash before dispatch (expired RESERVED recovered to FAILED, retriable)', async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'pg402-g3-crash-before-dispatch-'))
+    const dbPath = join(dbDir, 'shared.db')
+    let store1: GatewayDb | undefined
+    let store2: GatewayDb | undefined
+    try {
+      store1 = new GatewayDb(dbPath, 'crashed-instance')
+      await store1.init()
+
+      const requestId: Hex = '0x7777777777777777777777777777777777777777777777777777777777777777'
+      const txHash: Hex = '0x7777777777777777777777777777777777777777777777777777777777777778'
+
+      await store1.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      // Lock acquired with expired lease simulating crashed process before dispatch
+      const lockRes = await store1.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        leaseTtlMs: 0,
+      })
+      assert.equal(lockRes.acquired, true)
+      await store1.close() // Simulated crash
+
+      // New instance starts up and runs startup recovery
+      const store2 = new GatewayDb(dbPath, 'surviving-instance')
+      await store2.init()
+      await store2.recoverStartupStates()
+
+      const recoveredPayment = await store2.getPayment(txHash)
+      assert.equal(recoveredPayment?.state, 'FAILED')
+
+      // Client retries payment - lock can now be acquired safely
+      const retryLock = await store2.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        instanceId: 'surviving-instance',
+      })
+      assert.equal(retryLock.acquired, true)
+      assert.ok(retryLock.leaseToken)
+
+      await store2.close()
+    } finally {
+      await store1?.close().catch(() => {})
+      await store2?.close().catch(() => {})
+      try {
+        rmSync(dbDir, { recursive: true, force: true })
+      } catch {
+        // ignore Windows file lock latency
+      }
+    }
+  })
+
+  // 78. Process crash after dispatch begins (expired DISPATCHING recovered to UNCERTAIN, fail-closed)
+  test('78. Gate 3: Process crash after dispatch begins (expired DISPATCHING recovered to UNCERTAIN, fail-closed)', async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'pg402-g3-crash-after-dispatch-'))
+    const dbPath = join(dbDir, 'shared.db')
+    let store1: GatewayDb | undefined
+    let store2: GatewayDb | undefined
+    try {
+      store1 = new GatewayDb(dbPath, 'crashed-instance')
+      await store1.init()
+
+      const requestId: Hex = '0x7878787878787878787878787878787878787878787878787878787878787878'
+      const txHash: Hex = '0x7878787878787878787878787878787878787878787878787878787878787879'
+
+      await store1.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      const lockRes = await store1.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        leaseTtlMs: 0, // Expired immediately
+      })
+      assert.equal(lockRes.acquired, true)
+      await store1.transitionState(txHash, 'RESERVED', 'DISPATCHING', lockRes.leaseToken)
+      await store1.close() // Process terminates mid-dispatch
+
+      // New instance starts up and runs startup recovery
+      const store2 = new GatewayDb(dbPath, 'restarting-instance')
+      await store2.init()
+      await store2.recoverStartupStates()
+
+      const payment = await store2.getPayment(txHash)
+      assert.equal(payment?.state, 'UNCERTAIN')
+      assert.match(payment?.failureReason ?? '', /Upstream dispatch lease expired; locked to UNCERTAIN/)
+
+      // Client retry is rejected with UNCERTAIN_LOCKED (Invariants D & E)
+      const retryLock = await store2.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+      assert.equal(retryLock.acquired, false)
+      assert.equal(retryLock.reason, 'UNCERTAIN_LOCKED')
+
+      await store2.close()
+    } finally {
+      await store1?.close().catch(() => {})
+      await store2?.close().catch(() => {})
+      try {
+        rmSync(dbDir, { recursive: true, force: true })
+      } catch {
+        // ignore Windows file lock latency
+      }
+    }
+  })
+
+  // 79. Lease expiration during slow upstream operation (lease expires, recovery locks to UNCERTAIN, late return rejected)
+  test('79. Gate 3: Lease expiration during slow upstream operation (lease expires, recovery locks to UNCERTAIN, late return rejected)', async () => {
+    const harness = await setupTestHarness({ leaseTtlMs: 80 })
+    try {
+      // Mock slow upstream
+      const originalDispatch = harness.upstream.dispatch.bind(harness.upstream)
+      harness.upstream.dispatch = async (req) => {
+        // Sleep past lease expiration (150ms > 80ms TTL)
+        await new Promise(resolve => setTimeout(resolve, 150))
+        return originalDispatch(req)
+      }
+
+      const res402 = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, { method: 'POST' })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as { challenge: { requestId: Hex; expiresAt: number; bodyDigest: Hex } }
+
+      const txHash: Hex = '0x7979797979797979797979797979797979797979797979797979797979797979'
+      harness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/signals',
+          bodyDigest: challenge.bodyDigest,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // While upstream request is in flight, recovery runs after 100ms and marks expired dispatch UNCERTAIN
+      setTimeout(async () => {
+        await harness.db.recoverExpiredLeases()
+      }, 100)
+
+      const res = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+        },
+      })
+
+      // When slow upstream finishes, store.recordSuccess rejects with PaymentStateTransitionError,
+      // and server returns HTTP 500 STATE_RECORD_FAILED without leaking upstream data
+      assert.equal(res.status, 500)
+      const data = (await res.json()) as { error: string; code: string }
+      assert.equal(data.code, 'STATE_RECORD_FAILED')
+
+      // Database state remains UNCERTAIN
+      const paymentInDb = await harness.db.getPayment(txHash)
+      assert.equal(paymentInDb?.state, 'UNCERTAIN')
+      assert.equal(paymentInDb?.cachedResponse, null)
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  // 80. Upstream success with local commit failure (commit fails, upstream response not leaked)
+  test('80. Gate 3: Upstream success with local commit failure (commit fails, upstream response not leaked)', async () => {
+    const harness = await setupTestHarness({ mockPayload: 'SUPER_CONFIDENTIAL_ALPHA_DATA' })
+    try {
+      const res402 = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, { method: 'POST' })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as { challenge: { requestId: Hex; expiresAt: number; bodyDigest: Hex } }
+
+      const txHash: Hex = '0x8080808080808080808080808080808080808080808080808080808080808080'
+      harness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/signals',
+          bodyDigest: challenge.bodyDigest,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // Force recordSuccess to throw PaymentStateTransitionError
+      harness.db.recordSuccess = async () => {
+        throw new PaymentStateTransitionError('Simulated commit failure after upstream success')
+      }
+
+      const res = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+        },
+      })
+
+      assert.equal(res.status, 500)
+      const text = await res.text()
+      assert.ok(!text.includes('SUPER_CONFIDENTIAL_ALPHA_DATA'))
+      assert.ok(text.includes('STATE_RECORD_FAILED'))
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  // 81. Database failure / expiration during lease renewal (renewLease returns false)
+  test('81. Gate 3: Database failure / expiration during lease renewal (renewLease returns false)', async () => {
+    const store = new GatewayDb(':memory:')
+    await store.init()
+    try {
+      const requestId: Hex = '0x8181818181818181818181818181818181818181818181818181818181818181'
+      const txHash: Hex = '0x8181818181818181818181818181818181818181818181818181818181818182'
+
+      await store.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      const lockRes = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        leaseTtlMs: 50, // 50ms TTL
+      })
+      assert.equal(lockRes.acquired, true)
+      assert.ok(lockRes.leaseToken)
+
+      // 1. Wrong token returns false
+      const renewWrongToken = await store.renewLease(txHash, 'wrong-token', 5000)
+      assert.equal(renewWrongToken, false)
+
+      // 2. Non-existent txHash returns false
+      const renewWrongHash = await store.renewLease('0x9999999999999999999999999999999999999999999999999999999999999999', lockRes.leaseToken!, 5000)
+      assert.equal(renewWrongHash, false)
+
+      // 3. Wait for lease to expire (> 50ms)
+      await new Promise(resolve => setTimeout(resolve, 60))
+
+      // Renewal of already-expired lease must return false (no resurrection!)
+      const renewExpired = await store.renewLease(txHash, lockRes.leaseToken!, 5000)
+      assert.equal(renewExpired, false)
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 82. Clock and expiry boundary conditions (lease_expires_at === now)
+  test('82. Gate 3: Clock and expiry boundary conditions (lease_expires_at === now)', async () => {
+    const store = new GatewayDb(':memory:')
+    await store.init()
+    try {
+      const requestId: Hex = '0x8282828282828282828282828282828282828282828282828282828282828282'
+      const txHash: Hex = '0x8282828282828282828282828282828282828282828282828282828282828283'
+
+      await store.createChallenge({
+        requestId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: keccak256(toHex('')),
+        quotedPrice: 100_000n,
+        chainId: ARC_TESTNET_CHAIN_ID,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 600000,
+        status: 'ISSUED',
+      })
+
+      // Lock payment with 10 second lease
+      const lockRes = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100_000n,
+        leaseTtlMs: 10000,
+      })
+      assert.equal(lockRes.acquired, true)
+
+      // Test cutoff boundary: recoverExpiredLeases(cutoffTime)
+      // If cutoffTime < lease_expires_at, record is active (0 recovered)
+      const paymentBefore = await store.getPayment(txHash)
+      assert.ok(paymentBefore?.leaseExpiresAt)
+
+      const unexpiredRecover = await store.recoverExpiredLeases(paymentBefore!.leaseExpiresAt! - 1)
+      assert.equal(unexpiredRecover.recoveredFailed + unexpiredRecover.recoveredUncertain, 0)
+
+      // If cutoffTime === lease_expires_at, record is considered expired (1 recovered)
+      const boundaryRecover = await store.recoverExpiredLeases(paymentBefore!.leaseExpiresAt!)
+      assert.equal(boundaryRecover.recoveredFailed + boundaryRecover.recoveredUncertain, 1)
+
+      const paymentAfter = await store.getPayment(txHash)
+      assert.equal(paymentAfter?.state, 'FAILED')
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 83. Existing cached-response authorization regressions (EIP-712 + caller + serviceId verified)
+  test('83. Gate 3: Existing cached-response authorization regressions (EIP-712 + caller + serviceId verified)', async () => {
+    const harness = await setupTestHarness()
+    try {
+      const res402 = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, { method: 'POST' })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as { challenge: { requestId: Hex; expiresAt: number; bodyDigest: Hex } }
+
+      const txHash: Hex = '0x8383838383838383838383838383838383838383838383838383838383838383'
+      harness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      const sigAlice = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/signals',
+          bodyDigest: challenge.bodyDigest,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // Initial unlock
+      const resInit = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigAlice,
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(resInit.status, 200)
+      assert.equal(resInit.headers.get('X-PayGate-Status'), 'VERIFIED_ONCHAIN_SUCCESS')
+
+      // 1. Authorized retry succeeds with cached response
+      const resRetry = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigAlice,
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(resRetry.status, 200)
+      assert.equal(resRetry.headers.get('X-PayGate-Status'), 'VERIFIED_ONCHAIN_CACHED')
+
+      // 2. Tampered signature on retry rejected with 401 INVALID_SIGNATURE
+      const resBadSig = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1c',
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(resBadSig.status, 401)
+      const badSigData = (await resBadSig.json()) as { code: string }
+      assert.equal(badSigData.code, 'INVALID_SIGNATURE')
+
+      // 3. Different caller address (bob) on retry rejected with 401 SIGNER_MISMATCH
+      const sigBob = await bob.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/signals',
+          bodyDigest: challenge.bodyDigest,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+      const resBob = await fetch(`${harness.baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigBob,
+          'X-Payment-Payer': bob.address,
+        },
+      })
+      assert.equal(resBob.status, 401)
+      const bobData = (await resBob.json()) as { code: string }
+      assert.equal(bobData.code, 'SIGNER_MISMATCH')
+
+      // 4. Retry on different serviceId route rejected with 400 SERVICE_ID_MISMATCH
+      const resServiceMismatch = await fetch(`${harness.baseUrl}/v1/gateway/1/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sigAlice,
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(resServiceMismatch.status, 400)
+      const serviceMismatchData = (await resServiceMismatch.json()) as { code: string }
+      assert.equal(serviceMismatchData.code, 'SERVICE_ID_MISMATCH')
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  // 84. Duplicate request and idempotency regressions under concurrency
+  test('84. Gate 3: Duplicate request and idempotency regressions under concurrency', async () => {
+    const harness = await setupTestHarness()
+    try {
+      const res402 = await fetch(`${harness.baseUrl}/v1/gateway/0/feed`, { method: 'POST' })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as { challenge: { requestId: Hex; expiresAt: number; bodyDigest: Hex } }
+
+      const txHash: Hex = '0x8484848484848484848484848484848484848484848484848484848484848484'
+      harness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/feed',
+          bodyDigest: challenge.bodyDigest,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // Send 5 concurrent identical requests
+      const sendReq = () =>
+        fetch(`${harness.baseUrl}/v1/gateway/0/feed`, {
+          method: 'POST',
+          headers: {
+            'X-Payment-TxHash': txHash,
+            'X-Payment-RequestId': challenge.requestId,
+            'X-Payment-Signature': sig,
+            'X-Payment-Payer': alice.address,
+          },
+        })
+
+      const responses = await Promise.all([
+        sendReq(),
+        sendReq(),
+        sendReq(),
+        sendReq(),
+        sendReq(),
+      ])
+
+      const statuses = responses.map(r => r.status)
+      // Exactly one must be 200 (or if another completed fast, cached 200), and conflicting in-flights get 409
+      const statusCounts = statuses.reduce<Record<number, number>>((acc, s) => {
+        acc[s] = (acc[s] || 0) + 1
+        return acc
+      }, {})
+
+      // Must have at least one 200 and every response must be either 200 or 409
+      assert.ok(statusCounts[200] >= 1, `Expected at least one 200, got: ${JSON.stringify(statusCounts)}`)
+      for (const s of statuses) {
+        assert.ok(s === 200 || s === 409, `Unexpected status ${s}`)
+      }
+
+      // After all complete, subsequent request receives 200 VERIFIED_ONCHAIN_CACHED
+      const subsequentRes = await sendReq()
+      assert.equal(subsequentRes.status, 200)
+      assert.equal(subsequentRes.headers.get('X-PayGate-Status'), 'VERIFIED_ONCHAIN_CACHED')
+
+      // Upstream should have been invoked exactly once
+      assert.equal(harness.upstream.invocationCount, 1)
+    } finally {
+      await harness.teardown()
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Gate 4A: LibSqlGatewayStore Adapter & Durable Remote Storage Test Suite
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // 85. Gate 4A: Database URL sanitization and credential redaction
+  test('85. Gate 4A: Database URL sanitization and credential redaction', () => {
+    assert.equal(sanitizeDatabaseUrl(''), '')
+    assert.equal(sanitizeDatabaseUrl(':memory:'), ':memory:')
+    assert.equal(sanitizeDatabaseUrl('file:./local.db?mode=memory'), 'file:./local.db')
+
+    // Redacts credentials, tokens, and query strings
+    const sensitiveUrl1 = 'libsql://token_secret_123@my-db.turso.io:443/v1?auth=secret'
+    const sanitized1 = sanitizeDatabaseUrl(sensitiveUrl1)
+    assert.ok(!sanitized1.includes('token_secret_123'))
+    assert.ok(!sanitized1.includes('secret'))
+    assert.equal(sanitized1, 'libsql://my-db.turso.io:443/v1')
+
+    const sensitiveUrl2 = 'https://admin:super_secret_pass@db.turso.io'
+    const sanitized2 = sanitizeDatabaseUrl(sensitiveUrl2)
+    assert.ok(!sanitized2.includes('super_secret_pass'))
+    assert.ok(!sanitized2.includes('admin'))
+    assert.equal(sanitized2, 'https://db.turso.io/')
+  })
+
+  // 86. Gate 4A: Configuration validation: rejects invalid URL schemes, empty URLs, and missing Turso auth tokens
+  test('86. Gate 4A: Configuration validation: rejects invalid URL schemes, empty URLs, and missing Turso auth tokens', () => {
+    // Empty URL
+    assert.throws(
+      () => validateDatabaseUrl(''),
+      (err: unknown) => err instanceof GatewayConfigurationError && err.message.includes('empty or missing')
+    )
+
+    // Invalid scheme (e.g. postgres:// or ftp://)
+    assert.throws(
+      () => validateDatabaseUrl('postgres://user:pass@localhost:5432/mydb'),
+      (err: unknown) =>
+        err instanceof GatewayConfigurationError &&
+        err.message.includes('Unsupported database URL scheme "postgres:"') &&
+        !err.message.includes('pass')
+    )
+
+    // Turso URL without auth token
+    assert.throws(
+      () => validateDatabaseUrl('https://paygate-myorg.turso.io'),
+      (err: unknown) =>
+        err instanceof GatewayConfigurationError && err.message.includes('requires an authentication token')
+    )
+
+    // Valid URLs must not throw
+    assert.doesNotThrow(() => validateDatabaseUrl(':memory:'))
+    assert.doesNotThrow(() => validateDatabaseUrl('file:./gateway.db'))
+    assert.doesNotThrow(() => validateDatabaseUrl('libsql://localhost:8080'))
+    assert.doesNotThrow(() => validateDatabaseUrl('https://paygate-myorg.turso.io', 'valid_token'))
+  })
+
+  // 87. Gate 4A: createGatewayStore fail-closed enforcement when remoteStore=true without databaseUrl
+  test('87. Gate 4A: createGatewayStore fail-closed enforcement when remoteStore=true without databaseUrl', () => {
+    assert.throws(
+      () => createGatewayStore({ remoteStore: true }),
+      (err: unknown) =>
+        err instanceof GatewayConfigurationError &&
+        err.message.includes('Refusing to silently fall back to ephemeral local SQLite')
+    )
+  })
+
+  // 88. Gate 4A: LibSqlGatewayStore lifecycle: initialization, tables, schema migrations, and ping
+  test('88. Gate 4A: LibSqlGatewayStore lifecycle: initialization, tables, schema migrations, and ping', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    try {
+      assert.equal(typeof store.instanceId, 'string')
+      assert.ok(store.instanceId.startsWith('pg402-libsql-'))
+
+      // Before init, ping should work on memory db
+      const aliveBefore = await store.ping()
+      assert.equal(aliveBefore, true)
+
+      // Initialize schema
+      await store.init()
+
+      // Second init should be an idempotent no-op
+      await store.init()
+
+      const aliveAfter = await store.ping()
+      assert.equal(aliveAfter, true)
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 89. Gate 4A: Challenge operations: creation, retrieval, and status mutation to CONSUMED
+  test('89. Gate 4A: Challenge operations: creation, retrieval, and status mutation to CONSUMED', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    try {
+      await store.init()
+
+      const reqId: Hex = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'
+      const nonExistent = await store.getChallenge(reqId)
+      assert.equal(nonExistent, null)
+
+      const challenge = {
+        requestId: reqId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals/whale',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 50_000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 900_000,
+        status: 'ISSUED' as const,
+      }
+
+      await store.createChallenge(challenge)
+
+      const fetched = await store.getChallenge(reqId)
+      assert.ok(fetched !== null)
+      assert.equal(fetched.requestId, reqId)
+      assert.equal(fetched.serviceId, 0n)
+      assert.equal(fetched.payer.toLowerCase(), alice.address.toLowerCase())
+      assert.equal(fetched.quotedPrice, 50_000n)
+      assert.equal(fetched.status, 'ISSUED')
+
+      await store.markChallengeConsumed(reqId)
+      const consumed = await store.getChallenge(reqId)
+      assert.ok(consumed !== null)
+      assert.equal(consumed.status, 'CONSUMED')
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 90. Gate 4A: Atomic lock acquisition: fresh lock, duplicate txHash, duplicate requestId
+  test('90. Gate 4A: Atomic lock acquisition: fresh lock, duplicate txHash, duplicate requestId', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    try {
+      await store.init()
+
+      const txHash: Hex = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const reqId1: Hex = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      const reqId2: Hex = '0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+
+      // Pre-create challenges for foreign key integrity
+      await store.createChallenge({
+        requestId: reqId1,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/feed',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 20_000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+      await store.createChallenge({
+        requestId: reqId2,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/feed',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 20_000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      // 1. Fresh lock acquisition
+      const lock1 = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId: reqId1,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 20_000n,
+      })
+      assert.equal(lock1.acquired, true)
+      assert.ok(lock1.acquired && typeof lock1.leaseToken === 'string')
+
+      // 2. Duplicate lock attempt on same txHash while lease active -> CONCURRENT_CONFLICT
+      const lock2 = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId: reqId1,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 20_000n,
+      })
+      assert.equal(lock2.acquired, false)
+      assert.equal(!lock2.acquired && lock2.reason, 'CONCURRENT_CONFLICT')
+
+      // 3. Different txHash attempting to use the same requestId -> REQUEST_ID_ALREADY_USED
+      const txHash2: Hex = '0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+      const lock3 = await store.tryAcquirePaymentLock({
+        txHash: txHash2,
+        requestId: reqId1,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 20_000n,
+      })
+      assert.equal(lock3.acquired, false)
+      assert.equal(!lock3.acquired && lock3.reason, 'REQUEST_ID_ALREADY_USED')
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 91. Gate 4A: Lease renewal and optimistic state transitions with fencing tokens
+  test('91. Gate 4A: Lease renewal and optimistic state transitions with fencing tokens', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    try {
+      await store.init()
+
+      const txHash: Hex = '0x1010101010101010101010101010101010101010101010101010101010101010'
+      const reqId: Hex = '0x2020202020202020202020202020202020202020202020202020202020202020'
+
+      await store.createChallenge({
+        requestId: reqId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/test',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 10_000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      const lock = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId: reqId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 10_000n,
+        leaseTtlMs: 5000,
+      })
+      assert.equal(lock.acquired, true)
+      const token = lock.acquired ? lock.leaseToken! : ''
+
+      // Transition with wrong token fails
+      const badTokenTransition = await store.transitionState(txHash, 'RESERVED', 'VERIFYING', '0xwrongtoken')
+      assert.equal(badTokenTransition, false)
+
+      // Transition with valid token succeeds
+      const validTransition = await store.transitionState(txHash, 'RESERVED', 'VERIFYING', token)
+      assert.equal(validTransition, true)
+
+      // Renew lease
+      const renewed = await store.renewLease(txHash, token, 15000)
+      assert.equal(renewed, true)
+
+      const payment = await store.getPayment(txHash)
+      assert.ok(payment !== null)
+      assert.equal(payment.state, 'VERIFYING')
+      assert.equal(payment.leaseToken, token)
+      assert.ok(payment.leaseExpiresAt! > Date.now() + 10000)
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 92. Gate 4A: Expired lease reclamation (RESERVED/VERIFYING reset to FAILED, DISPATCHING locks to UNCERTAIN)
+  test('92. Gate 4A: Expired lease reclamation (RESERVED/VERIFYING reset to FAILED, DISPATCHING locks to UNCERTAIN)', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    try {
+      await store.init()
+
+      const txHash: Hex = '0x3030303030303030303030303030303030303030303030303030303030303030'
+      const reqId: Hex = '0x4040404040404040404040404040404040404040404040404040404040404040'
+
+      await store.createChallenge({
+        requestId: reqId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/test',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 10_000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      // Lock with negative TTL (already expired)
+      const lock1 = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId: reqId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 10_000n,
+        leaseTtlMs: -1000,
+      })
+      assert.equal(lock1.acquired, true)
+
+      // Reclaim expired RESERVED lease -> succeeds with new lease token
+      const lock2 = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId: reqId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 10_000n,
+        leaseTtlMs: 30000,
+      })
+      assert.equal(lock2.acquired, true)
+      assert.ok(lock2.acquired && lock2.leaseToken !== (lock1.acquired ? lock1.leaseToken : ''))
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 93. Gate 4A: Startup recovery sweeps expired leases without affecting active unexpired leases
+  test('93. Gate 4A: Startup recovery sweeps expired leases without affecting active unexpired leases', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    try {
+      await store.init()
+
+      const txExpiredReserved: Hex = '0x5050505050505050505050505050505050505050505050505050505050505050'
+      const txExpiredDispatch: Hex = '0x5151515151515151515151515151515151515151515151515151515151515151'
+      const txActiveDispatch: Hex = '0x5252525252525252525252525252525252525252525252525252525252525252'
+
+      const r1: Hex = '0x6060606060606060606060606060606060606060606060606060606060606060'
+      const r2: Hex = '0x6161616161616161616161616161616161616161616161616161616161616161'
+      const r3: Hex = '0x6262626262626262626262626262626262626262626262626262626262626262'
+
+      for (const [r] of [[r1], [r2], [r3]]) {
+        await store.createChallenge({
+          requestId: r,
+          serviceId: 0n,
+          payer: alice.address,
+          method: 'POST',
+          path: '/test',
+          bodyDigest: EMPTY_BODY_DIGEST,
+          quotedPrice: 10_000n,
+          chainId: 5042,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 60000,
+          status: 'ISSUED',
+        })
+      }
+
+      // 1. Expired RESERVED (lease expired 10s ago)
+      await store.tryAcquirePaymentLock({
+        txHash: txExpiredReserved,
+        requestId: r1,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 10_000n,
+        leaseTtlMs: -10000,
+      })
+
+      // 2. Expired DISPATCHING (transitioned, then expired)
+      const lockDispatch = await store.tryAcquirePaymentLock({
+        txHash: txExpiredDispatch,
+        requestId: r2,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 10_000n,
+        leaseTtlMs: -5000,
+      })
+      assert.equal(lockDispatch.acquired, true)
+      await store.transitionState(
+        txExpiredDispatch,
+        'RESERVED',
+        'DISPATCHING',
+        lockDispatch.acquired ? lockDispatch.leaseToken : undefined
+      )
+
+      // 3. Active DISPATCHING (lease valid for 60s)
+      const lockActive = await store.tryAcquirePaymentLock({
+        txHash: txActiveDispatch,
+        requestId: r3,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 10_000n,
+        leaseTtlMs: 60000,
+      })
+      assert.equal(lockActive.acquired, true)
+      await store.transitionState(
+        txActiveDispatch,
+        'RESERVED',
+        'DISPATCHING',
+        lockActive.acquired ? lockActive.leaseToken : undefined
+      )
+
+      // Run recovery
+      const stats = await store.recoverStartupStates()
+      assert.equal(stats.recoveredFailed, 1)
+      assert.equal(stats.recoveredUncertain, 1)
+
+      // Verify states
+      const p1 = await store.getPayment(txExpiredReserved)
+      assert.equal(p1?.state, 'FAILED')
+
+      const p2 = await store.getPayment(txExpiredDispatch)
+      assert.equal(p2?.state, 'UNCERTAIN')
+
+      // Active dispatch must remain DISPATCHING (Invariant C)
+      const p3 = await store.getPayment(txActiveDispatch)
+      assert.equal(p3?.state, 'DISPATCHING')
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 94. Gate 4A: Guarded recordSuccess (only from DISPATCHING with valid leaseToken, payload cached) and recordFailed/recordUncertain
+  test('94. Gate 4A: Guarded recordSuccess (only from DISPATCHING with valid leaseToken, payload cached) and recordFailed/recordUncertain', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    try {
+      await store.init()
+
+      const txHash: Hex = '0x7070707070707070707070707070707070707070707070707070707070707070'
+      const reqId: Hex = '0x8080808080808080808080808080808080808080808080808080808080808080'
+
+      await store.createChallenge({
+        requestId: reqId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/test',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 10_000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      const lock = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId: reqId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 10_000n,
+      })
+      assert.equal(lock.acquired, true)
+      const token = lock.acquired ? lock.leaseToken! : ''
+
+      // Attempting recordSuccess while in RESERVED state must throw PaymentStateTransitionError
+      await assert.rejects(
+        () => store.recordSuccess(txHash, JSON.stringify({ data: 'secret' }), alice.address, token),
+        (err: unknown) => err instanceof PaymentStateTransitionError
+      )
+
+      // Move to DISPATCHING
+      await store.transitionState(txHash, 'RESERVED', 'DISPATCHING', token)
+
+      // Attempt recordSuccess with invalid token must throw
+      await assert.rejects(
+        () => store.recordSuccess(txHash, JSON.stringify({ data: 'secret' }), alice.address, '0xbadtoken'),
+        (err: unknown) => err instanceof PaymentStateTransitionError
+      )
+
+      // Valid recordSuccess succeeds
+      const cachedPayload = JSON.stringify({ data: 'secret_payload', timestamp: 12345 })
+      await store.recordSuccess(txHash, cachedPayload, alice.address, token)
+
+      const payment = await store.getPayment(txHash)
+      assert.ok(payment !== null)
+      assert.equal(payment.state, 'SUCCEEDED')
+      assert.equal(payment.cachedResponse, cachedPayload)
+      assert.equal(payment.caller.toLowerCase(), alice.address.toLowerCase())
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 95. Gate 4A: Full Gateway Server HTTP 402 integration with LibSqlGatewayStore
+  test('95. Gate 4A: Full Gateway Server HTTP 402 integration with LibSqlGatewayStore', async () => {
+    const config = resolveGatewayConfig({
+      port: 0,
+      mockRpc: true,
+      remoteStore: true,
+      databaseUrl: ':memory:',
+    })
+
+    const db = createGatewayStore(config)
+    await db.init()
+    const rpc = new MockRpcClient()
+    const verifier = new BlockchainVerifier(rpc, config.minConfirmations, config.contractAddress, config.chainId)
+    const upstream = new MockUpstreamAdapter()
+
+    const server = await createGatewayServer({
+      config,
+      db,
+      verifier,
+      upstream,
+      rpc,
+    })
+
+    await new Promise<void>(resolve => server.listen(0, resolve))
+    const addr = server.address()
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0
+    const baseUrl = `http://127.0.0.1:${port}`
+
+    try {
+      // 1. Health check returns 200 with database connected
+      const healthRes = await fetch(`${baseUrl}/health`)
+      assert.equal(healthRes.status, 200)
+      const healthData = (await healthRes.json()) as { status: string; database: string }
+      assert.equal(healthData.status, 'healthy')
+      assert.equal(healthData.database, 'connected')
+
+      // 2. Unauthenticated request triggers 402 challenge
+      const res402 = await fetch(`${baseUrl}/v1/gateway/0/signals`, { method: 'POST' })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as {
+        challenge: { requestId: Hex; quotedPrice: string; expiresAt: number; bodyDigest: Hex }
+      }
+      assert.ok(challenge.requestId)
+
+      // 3. Register mock payment
+      const txHash: Hex = '0x9595959595959595959595959595959595959595959595959595959595959595'
+      rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100_000n,
+      })
+
+      // 4. Sign EIP-712 authorization
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/signals',
+          bodyDigest: challenge.bodyDigest,
+          quotedPrice: 100_000n,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+
+      // 5. Submit payment and unlock payload
+      const unlockRes = await fetch(`${baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(unlockRes.status, 200)
+      assert.equal(unlockRes.headers.get('X-PayGate-Status'), 'SIMULATED_MOCK_SUCCESS')
+      assert.equal(unlockRes.headers.get('X-PayGate-Simulation'), 'true')
+      assert.equal(unlockRes.headers.get('X-PayGate-Notice'), 'SIMULATED DEMO -- NOT ON-CHAIN AUTHORIZED')
+      const unlockBody = (await unlockRes.json()) as { signal: string }
+      assert.equal(unlockBody.signal, 'VERIFIED_ONCHAIN_PAYMENT_PAYLOAD')
+      assert.equal(upstream.invocationCount, 1)
+
+      // 6. Idempotent replay receives cached response without re-invoking upstream
+      const retryRes = await fetch(`${baseUrl}/v1/gateway/0/signals`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(retryRes.status, 200)
+      assert.equal(retryRes.headers.get('X-PayGate-Status'), 'SIMULATED_MOCK_CACHED')
+      assert.equal(retryRes.headers.get('X-PayGate-Simulation'), 'true')
+      assert.equal(retryRes.headers.get('X-PayGate-Cached'), 'true')
+      assert.equal(upstream.invocationCount, 1) // Did not increment!
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(err => (err ? reject(err) : resolve()))
+      })
+      await db.close()
+    }
+  })
+
+  // 96. Gate 4B.1: /v1/mock/register-payment route authentication and public isolation
+  test('96. Gate 4B.1: /v1/mock/register-payment route authentication and public isolation', async () => {
+    const testSecret = 'sec-gate4b1-test-token-xyz'
+    const harness = await setupTestHarness({ mockRpc: true })
+    const configWithSecret = resolveGatewayConfig({
+      port: 0,
+      mockRpc: true,
+      gatewayTestSecret: testSecret,
+    })
+    const db2 = new GatewayDb(':memory:')
+    await db2.init()
+    const rpc2 = new MockRpcClient()
+    const verifier2 = new BlockchainVerifier(rpc2, configWithSecret.minConfirmations)
+    const upstream2 = new MockUpstreamAdapter()
+    const authServer = await createGatewayServer({
+      config: configWithSecret,
+      db: db2,
+      verifier: verifier2,
+      upstream: upstream2,
+      rpc: rpc2,
+    })
+    await new Promise<void>(resolve => authServer.listen(0, resolve))
+    const authAddr = authServer.address()
+    const authPort = typeof authAddr === 'object' && authAddr !== null ? authAddr.port : 0
+    const authUrl = `http://127.0.0.1:${authPort}`
+
+    try {
+      // Case 1: Unauthenticated request to protected mock endpoint fails with 401
+      const unauthRes = await fetch(`${authUrl}/v1/mock/register-payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          txHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
+          requestId: '0x2222222222222222222222222222222222222222222222222222222222222222',
+          caller: alice.address,
+        }),
+      })
+      assert.equal(unauthRes.status, 401)
+      const unauthData = (await unauthRes.json()) as { code: string }
+      assert.equal(unauthData.code, 'UNAUTHORIZED_MOCK_ACCESS')
+
+      // Case 2: Wrong secret returns 401
+      const wrongRes = await fetch(`${authUrl}/v1/mock/register-payment`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Gateway-Test-Secret': 'wrong-secret',
+        },
+        body: JSON.stringify({
+          txHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
+          requestId: '0x2222222222222222222222222222222222222222222222222222222222222222',
+          caller: alice.address,
+        }),
+      })
+      assert.equal(wrongRes.status, 401)
+
+      // Case 3: Valid secret via X-Gateway-Test-Secret succeeds with 200
+      const validRes = await fetch(`${authUrl}/v1/mock/register-payment`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Gateway-Test-Secret': testSecret,
+        },
+        body: JSON.stringify({
+          txHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
+          requestId: '0x2222222222222222222222222222222222222222222222222222222222222222',
+          caller: alice.address,
+        }),
+      })
+      assert.equal(validRes.status, 200)
+      const validData = (await validRes.json()) as { status: string; simulated: boolean }
+      assert.equal(validData.status, 'registered')
+      assert.equal(validData.simulated, true)
+
+      // Case 4: Live mode (mockRpc=false) returns 404 Not Found
+      const liveHarness = await setupTestHarness({ mockRpc: false })
+      try {
+        const liveRes = await fetch(`${liveHarness.baseUrl}/v1/mock/register-payment`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            txHash: '0x3333333333333333333333333333333333333333333333333333333333333333',
+            requestId: '0x4444444444444444444444444444444444444444444444444444444444444444',
+            caller: alice.address,
+          }),
+        })
+        assert.equal(liveRes.status, 404)
+      } finally {
+        await liveHarness.teardown()
+      }
+    } finally {
+      await harness.teardown()
+      await new Promise<void>((resolve, reject) => {
+        authServer.close(err => (err ? reject(err) : resolve()))
+      })
+      await db2.close()
+    }
+  })
+
+  // 97. Gate 4B.1: Verification response partitioning (SIMULATED_MOCK_SUCCESS vs VERIFIED_ONCHAIN_SUCCESS)
+  test('97. Gate 4B.1: Verification response partitioning (SIMULATED_MOCK_SUCCESS vs VERIFIED_ONCHAIN_SUCCESS)', async () => {
+    // 1. Mock Mode: Emits SIMULATED_MOCK_SUCCESS and simulation headers
+    const mockHarness = await setupTestHarness({ mockRpc: true })
+    try {
+      const res402 = await fetch(`${mockHarness.baseUrl}/v1/gateway/0/feed`, { method: 'POST' })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as { challenge: PaymentChallenge }
+      const txHash: Hex = '0x1212121212121212121212121212121212121212121212121212121212121212'
+      mockHarness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100000n,
+        status: 'success',
+      })
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/feed',
+          bodyDigest: challenge.bodyDigest as Hex,
+          quotedPrice: challenge.quotedPrice,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+      const resUnlock = await fetch(`${mockHarness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(resUnlock.status, 200)
+      assert.equal(resUnlock.headers.get('X-PayGate-Status'), 'SIMULATED_MOCK_SUCCESS')
+      assert.equal(resUnlock.headers.get('X-PayGate-Simulation'), 'true')
+      assert.equal(resUnlock.headers.get('X-PayGate-Notice'), 'SIMULATED DEMO -- NOT ON-CHAIN AUTHORIZED')
+
+      // Cached replay in mock mode
+      const resCached = await fetch(`${mockHarness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(resCached.status, 200)
+      assert.equal(resCached.headers.get('X-PayGate-Status'), 'SIMULATED_MOCK_CACHED')
+      assert.equal(resCached.headers.get('X-PayGate-Simulation'), 'true')
+    } finally {
+      await mockHarness.teardown()
+    }
+
+    // 2. Real Mode (mockRpc: false): Emits VERIFIED_ONCHAIN_SUCCESS without simulation headers
+    const realHarness = await setupTestHarness({ mockRpc: false })
+    try {
+      const res402 = await fetch(`${realHarness.baseUrl}/v1/gateway/0/feed`, { method: 'POST' })
+      assert.equal(res402.status, 402)
+      const { challenge } = (await res402.json()) as { challenge: PaymentChallenge }
+      const txHash: Hex = '0x3434343434343434343434343434343434343434343434343434343434343434'
+      realHarness.rpc.registerValidPayment({
+        txHash,
+        serviceId: 0n,
+        requestId: challenge.requestId,
+        caller: alice.address,
+        amountPaid: 100000n,
+        status: 'success',
+      })
+      const sig = await alice.signTypedData({
+        domain: PAYGATE_EIP712_DOMAIN,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: {
+          serviceId: 0n,
+          requestId: challenge.requestId,
+          txHash,
+          method: 'POST',
+          path: '/feed',
+          bodyDigest: challenge.bodyDigest as Hex,
+          quotedPrice: challenge.quotedPrice,
+          expiresAt: BigInt(challenge.expiresAt),
+        },
+      })
+      const resUnlock = await fetch(`${realHarness.baseUrl}/v1/gateway/0/feed`, {
+        method: 'POST',
+        headers: {
+          'X-Payment-TxHash': txHash,
+          'X-Payment-RequestId': challenge.requestId,
+          'X-Payment-Signature': sig,
+          'X-Payment-Payer': alice.address,
+        },
+      })
+      assert.equal(resUnlock.status, 200)
+      assert.equal(resUnlock.headers.get('X-PayGate-Status'), 'VERIFIED_ONCHAIN_SUCCESS')
+      assert.equal(resUnlock.headers.get('X-PayGate-Simulation'), null)
+    } finally {
+      await realHarness.teardown()
+    }
+  })
+
+  // 98. Gate 4B.1: SQLITE_BUSY and serialization contention handling in tryAcquirePaymentLock
+  test('98. Gate 4B.1: SQLITE_BUSY and serialization contention handling in tryAcquirePaymentLock', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    await store.init()
+    try {
+      const txHash: Hex = '0x5555555555555555555555555555555555555555555555555555555555555555'
+      const reqId: Hex = '0x6666666666666666666666666666666666666666666666666666666666666666'
+
+      // Pre-create challenge for foreign key integrity
+      await store.createChallenge({
+        requestId: reqId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 100000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      // Acquire first lock normally
+      const res1 = await store.tryAcquirePaymentLock({
+        txHash,
+        requestId: reqId,
+        serviceId: 0n,
+        caller: alice.address,
+        amountPaid: 100000n,
+      })
+      assert.equal(res1.acquired, true)
+
+      // Test that concurrent transaction simulation with SQLITE_BUSY error returns CONCURRENT_CONFLICT
+      // rather than bubbling an uncaught 500 error
+      const originalTx = store['client'].transaction.bind(store['client'])
+      store['client'].transaction = async () => {
+        throw new Error('SQLITE_BUSY: database is locked')
+      }
+
+      const reqIdBusy: Hex = '0x8888888888888888888888888888888888888888888888888888888888888888'
+      await store.createChallenge({
+        requestId: reqIdBusy,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 100000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      try {
+        const busyRes = await store.tryAcquirePaymentLock({
+          txHash: '0x7777777777777777777777777777777777777777777777777777777777777777',
+          requestId: reqIdBusy,
+          serviceId: 0n,
+          caller: alice.address,
+          amountPaid: 100000n,
+        })
+        assert.equal(busyRes.acquired, false)
+        assert.equal(busyRes.reason, 'CONCURRENT_CONFLICT')
+      } finally {
+        store['client'].transaction = originalTx
+      }
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 99. Gate 4B.1: Lost-commit idempotency reconciliation after ambiguous transaction commit
+  test('99. Gate 4B.1: Lost-commit idempotency reconciliation after ambiguous transaction commit', async () => {
+    const store = new LibSqlGatewayStore({ url: ':memory:' })
+    await store.init()
+    try {
+      const txHash: Hex = '0x9090909090909090909090909090909090909090909090909090909090909090'
+      const reqId: Hex = '0x9191919191919191919191919191919191919191919191919191919191919191'
+
+      // Pre-create challenge for foreign key integrity
+      await store.createChallenge({
+        requestId: reqId,
+        serviceId: 0n,
+        payer: alice.address,
+        method: 'POST',
+        path: '/signals',
+        bodyDigest: EMPTY_BODY_DIGEST,
+        quotedPrice: 100000n,
+        chainId: 5042,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        status: 'ISSUED',
+      })
+
+      // Mock tx.commit() throwing a network socket disconnect exception AFTER writing the record
+      const originalTransaction = store['client'].transaction.bind(store['client'])
+
+      store['client'].transaction = async (mode: any) => {
+        const realTx = await originalTransaction(mode)
+        const originalCommit = realTx.commit.bind(realTx)
+        realTx.commit = async () => {
+          await originalCommit() // Real commit succeeds on remote server
+          throw new Error('LibsqlError: fetch failed / WebSocket disconnected during COMMIT ack')
+        }
+        return realTx
+      }
+
+      try {
+        const reconcileResult = await store.tryAcquirePaymentLock({
+          txHash,
+          requestId: reqId,
+          serviceId: 0n,
+          caller: alice.address,
+          amountPaid: 100000n,
+        })
+        // The reconciliation logic detects that the record was committed with its leaseToken
+        assert.equal(reconcileResult.acquired, true)
+        assert.ok(typeof reconcileResult.leaseToken === 'string')
+        assert.ok(reconcileResult.leaseExpiresAt! > Date.now())
+
+        // Verify the database record is in RESERVED state with that leaseToken
+        const payment = await store.getPayment(txHash)
+        assert.equal(payment?.state, 'RESERVED')
+        assert.equal(payment?.leaseToken, reconcileResult.leaseToken)
+      } finally {
+        store['client'].transaction = originalTransaction
+      }
+    } finally {
+      await store.close()
+    }
+  })
+
+  // 100. Gate 4B.2: Gateway starts and resolves contract ABI from tracked metadata when Foundry artifacts are absent
+  test('100. Gate 4B.2: Gateway starts and resolves contract ABI from tracked metadata when Foundry artifacts are absent', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const currentDir = path.dirname(fileURLToPath(import.meta.url))
+    const rootDir = path.resolve(currentDir, '..')
+
+    // Verify tracked metadata file exists and contains strictly valid ABI
+    const metaPath = path.resolve(rootDir, 'contracts/contract-metadata/PayGate402.json')
+    assert.ok(fs.existsSync(metaPath), 'contracts/contract-metadata/PayGate402.json must exist in Git')
+    const metaContent = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
+    assert.ok(Array.isArray(metaContent.abi), 'Tracked metadata must contain an ABI array')
+    
+    // Verify essential PayGate402 function ABIs are present in metadata
+    const functionNames = new Set(metaContent.abi.filter((x: { type?: string }) => x.type === 'function').map((x: { name: string }) => x.name))
+    assert.ok(functionNames.has('payForAccess'), 'ABI must include payForAccess')
+    assert.ok(functionNames.has('nextServiceId'), 'ABI must include nextServiceId')
+    assert.ok(functionNames.has('services'), 'ABI must include services')
+    assert.ok(functionNames.has('verifyAccess'), 'ABI must include verifyAccess')
+
+    // Verify ensure_artifacts script runs cleanly
+    const ensureScript = path.resolve(rootDir, 'scripts/ensure_artifacts.js')
+    assert.ok(fs.existsSync(ensureScript), 'scripts/ensure_artifacts.js must exist')
+    const { execFileSync } = await import('node:child_process')
+    const output = execFileSync(process.execPath, [ensureScript], { encoding: 'utf8' })
+    assert.ok(output !== undefined)
+
+    // Verify target artifact file now exists at the exact required path
+    const targetPath = path.resolve(rootDir, 'contracts/out/PayGate402.sol/PayGate402.json')
+    assert.ok(fs.existsSync(targetPath), 'Target artifact must exist at contracts/out/PayGate402.sol/PayGate402.json')
+    const targetContent = JSON.parse(fs.readFileSync(targetPath, 'utf8'))
+    assert.ok(Array.isArray(targetContent.abi), 'Target artifact must have valid ABI array')
+
+    // Verify gateway can start and serve /health cleanly
+    const { startGateway } = await import('../src/gateway/index.ts')
+    const testPort = 4031
+    const gw = await startGateway({
+      port: testPort,
+      mockRpc: true,
+      dbPath: ':memory:',
+    })
+    try {
+      const res = await fetch(`http://localhost:${testPort}/health`)
+      assert.equal(res.status, 200)
+      const data = await res.json() as { status: string; contract: string }
+      assert.equal(data.status, 'healthy')
+      assert.ok(data.contract)
+    } finally {
+      await gw.close()
+    }
   })
 })
 

@@ -15,11 +15,14 @@ import {
   ARC_TESTNET_CHAIN_ID,
   PAYGATE402_CONTRACT_ADDRESS,
 } from './types.ts'
-import { VerificationError, type RpcClientInterface, type ServiceInfo } from './verifier.ts'
-import { createRequire } from 'node:module'
+import {
+  VerificationError,
+  loadContractAbi,
+  type RpcClientInterface,
+  type ServiceInfo,
+} from './verifier.ts'
 
-const require = createRequire(import.meta.url)
-const artifact = require('../../contracts/out/PayGate402.sol/PayGate402.json') as { abi: readonly unknown[] }
+const artifact = { abi: loadContractAbi() }
 
 export class MockRpcClient implements RpcClientInterface {
   public chainId: number = ARC_TESTNET_CHAIN_ID

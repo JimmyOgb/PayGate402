@@ -29,7 +29,27 @@ import {
 } from './types.ts'
 import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
-const artifact = require('../../contracts/out/PayGate402.sol/PayGate402.json') as { abi: readonly unknown[] }
+
+export function loadContractAbi(): readonly unknown[] {
+  try {
+    const art = require('../../contracts/out/PayGate402.sol/PayGate402.json') as { abi: readonly unknown[] }
+    if (Array.isArray(art.abi) && art.abi.length > 0) return art.abi
+  } catch {
+    // Fall back to tracked metadata artifact (committed in git) for environments without forge
+  }
+  try {
+    const meta = require('../../contracts/contract-metadata/PayGate402.json') as { abi: readonly unknown[] }
+    if (Array.isArray(meta.abi) && meta.abi.length > 0) return meta.abi
+  } catch {
+    // Both failed
+  }
+  throw new Error(
+    'Unable to load PayGate402 ABI from either contracts/out/PayGate402.sol/PayGate402.json or contracts/contract-metadata/PayGate402.json'
+  )
+}
+
+export const PAYGATE402_ABI = loadContractAbi()
+const artifact = { abi: PAYGATE402_ABI }
 
 export interface ServiceInfo {
   serviceId: bigint
@@ -456,6 +476,104 @@ export class BlockchainVerifier {
       verifiedCaller: eventCaller,
       amountPaid: eventAmountPaid,
       blockNumber: receipt.blockNumber,
+    }
+  }
+
+  /**
+   * Verifies EIP-712 signature and request binding for an already-succeeded cached retry.
+   * Does NOT re-query onchain state since the payment already settled, but strictly verifies
+   * that the requester possesses the private key corresponding to the recorded onchain caller
+   * and that the request method, path, and payload digest match the challenge.
+   */
+  public async verifyRetryAuthorization(params: {
+    txHash: Hex
+    challenge: PaymentChallenge
+    signature: Hex
+    expectedCaller: Address
+    currentPath: string
+    currentMethod: string
+    currentBodyDigest: Hex
+    currentServiceId?: bigint
+  }): Promise<void> {
+    const { txHash, challenge, signature, expectedCaller, currentPath, currentMethod, currentBodyDigest, currentServiceId } = params
+
+    // 0. Verify Service ID Binding (Gate 2 Observation Fix)
+    if (currentServiceId !== undefined && challenge.serviceId !== currentServiceId) {
+      throw new VerificationError(
+        `Service ID mismatch: challenge was issued for service ${challenge.serviceId}, but requested route is service ${currentServiceId}`,
+        400,
+        'SERVICE_ID_MISMATCH'
+      )
+    }
+
+    // 1. Verify Request Binding Against Persisted Challenge
+    if (challenge.path !== currentPath) {
+      throw new VerificationError(
+        `Path mismatch: challenge was issued for ${challenge.path}, got ${currentPath}`,
+        400,
+        'PATH_MISMATCH'
+      )
+    }
+
+    if (challenge.method.toUpperCase() !== currentMethod.toUpperCase()) {
+      throw new VerificationError(
+        `Method mismatch: challenge was issued for ${challenge.method}, got ${currentMethod}`,
+        400,
+        'METHOD_MISMATCH'
+      )
+    }
+
+    if (challenge.bodyDigest.toLowerCase() !== currentBodyDigest.toLowerCase()) {
+      throw new VerificationError(
+        'Request body digest mismatch: payload has been modified',
+        400,
+        'BODY_DIGEST_MISMATCH'
+      )
+    }
+
+    // 2. Bound payer check (if challenge specified a payer)
+    if (challenge.payer && challenge.payer.toLowerCase() !== expectedCaller.toLowerCase()) {
+      throw new VerificationError(
+        `Event caller ${expectedCaller} does not match challenge payer ${challenge.payer}`,
+        401,
+        'CALLER_MISMATCH'
+      )
+    }
+
+    // 3. EIP-712 Wallet Signature Verification against expectedCaller
+    const eip712Message = {
+      serviceId: challenge.serviceId,
+      requestId: challenge.requestId,
+      txHash: txHash,
+      method: challenge.method,
+      path: challenge.path,
+      bodyDigest: challenge.bodyDigest,
+      quotedPrice: challenge.quotedPrice,
+      expiresAt: BigInt(challenge.expiresAt),
+    }
+
+    const domain = buildEip712Domain(this.chainId, this.contractAddress)
+    let isValidSignature = false
+    try {
+      isValidSignature = await verifyTypedData({
+        address: expectedCaller,
+        domain,
+        types: PAYGATE_EIP712_TYPES,
+        primaryType: 'PayGateAuthorization',
+        message: eip712Message,
+        signature,
+      })
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new VerificationError(`Signature verification failed: ${msg}`, 401, 'INVALID_SIGNATURE')
+    }
+
+    if (!isValidSignature) {
+      throw new VerificationError(
+        'Wallet signature is invalid or was not signed by the payment caller address',
+        401,
+        'SIGNER_MISMATCH'
+      )
     }
   }
 }

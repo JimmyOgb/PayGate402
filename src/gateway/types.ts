@@ -100,6 +100,9 @@ export interface PaymentRecord {
   updatedAt: number
   consumedAt: number | null
   failureReason?: string | null
+  leaseOwner?: string | null
+  leaseExpiresAt?: number | null
+  leaseToken?: string | null
 }
 
 export type UpstreamMode = 'mock' | 'http' | 'real_metrics'
@@ -120,6 +123,13 @@ export interface GatewayConfig {
   maxBodySizeBytes?: number // Default: 1048576 (1 MiB)
   rateLimitWindowMs?: number // Default: 60000 (1 minute)
   maxChallengesPerWindow?: number // Default: 60
+  instanceId?: string
+  leaseTtlMs?: number // Default: 30000 (30 seconds)
+  databaseUrl?: string
+  remoteUrl?: string
+  remoteStore?: boolean
+  authToken?: string
+  gatewayTestSecret?: string
 }
 
 export class GatewayConfigurationError extends Error {
@@ -127,6 +137,147 @@ export class GatewayConfigurationError extends Error {
     super(message)
     this.name = 'GatewayConfigurationError'
   }
+}
+
+export class PaymentStateTransitionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PaymentStateTransitionError'
+  }
+}
+
+export interface AcquirePaymentLockParams {
+  txHash: Hex
+  requestId: Hex
+  serviceId: bigint
+  caller: Address
+  amountPaid: bigint
+  leaseOwner?: string
+  leaseTtlMs?: number
+}
+
+export type AcquireLockResult =
+  | {
+      acquired: true
+      leaseToken?: string
+      leaseExpiresAt?: number
+    }
+  | {
+      acquired: false
+      reason:
+        | 'ALREADY_SUCCEEDED'
+        | 'CONCURRENT_CONFLICT'
+        | 'UNCERTAIN_LOCKED'
+        | 'REQUEST_ID_ALREADY_USED'
+        | 'PAYMENT_ALREADY_CONSUMED'
+      cachedResponse?: string
+      caller?: Address
+    }
+
+export interface StartupRecoveryResult {
+  recoveredUncertain: number
+  recoveredFailed: number
+}
+
+/**
+ * Asynchronous Storage Abstraction for PayGate402 Gateway.
+ * Supports dual-mode implementation: local embedded SQLite (node:sqlite) for zero-cost,
+ * offline deterministic testing and remote libSQL (@libsql/client) for cloud persistence.
+ */
+export interface GatewayStore {
+  /**
+   * Initializes database schema, tables, and indexes asynchronously.
+   */
+  init(): Promise<void>
+
+  /**
+   * Persists a server-issued challenge bound to request metadata.
+   */
+  createChallenge(challenge: PaymentChallenge): Promise<void>
+
+  /**
+   * Retrieves a challenge by request ID.
+   */
+  getChallenge(requestId: Hex): Promise<PaymentChallenge | null>
+
+  /**
+   * Marks a challenge ticket as CONSUMED.
+   */
+  markChallengeConsumed(requestId: Hex): Promise<void>
+
+  /**
+   * Atomically acquires a mutual exclusion lock on (txHash, requestId).
+   * Enforces replay protection and single-use request ID constraints.
+   */
+  tryAcquirePaymentLock(params: AcquirePaymentLockParams): Promise<AcquireLockResult>
+
+  /**
+   * Performs an optimistic atomic state transition.
+   * Returns true if exactly 1 row was transitioned.
+   */
+  transitionState(
+    txHash: Hex,
+    fromState: PaymentState,
+    toState: PaymentState,
+    leaseToken?: string
+  ): Promise<boolean>
+
+  /**
+   * Extends the lease for long-running operations.
+   * Returns true if the lease was renewed, false if expired or token mismatch.
+   */
+  renewLease(
+    txHash: Hex,
+    leaseToken: string,
+    additionalTtlMs?: number
+  ): Promise<boolean>
+
+  /**
+   * Recovers lingering in-flight states from prior process crashes.
+   */
+  recoverStartupStates(cutoffTime?: number): Promise<StartupRecoveryResult>
+
+  /**
+   * Sweeps expired leases across distributed nodes.
+   */
+  recoverExpiredLeases(cutoffTime?: number): Promise<StartupRecoveryResult>
+
+  /**
+   * Records successful upstream response, caches payload, and marks SUCCEEDED.
+   * Guarded: Mutation succeeds ONLY when the current state is 'DISPATCHING'.
+   * Requires exactly one affected row; throws PaymentStateTransitionError otherwise.
+   */
+  recordSuccess(
+    txHash: Hex,
+    cachedResponse: string,
+    verifiedCaller?: Address,
+    leaseToken?: string
+  ): Promise<void>
+
+  /**
+   * Records failure reason and transitions state to 'FAILED' for safe retry.
+   */
+  recordFailed(txHash: Hex, reason: string, leaseToken?: string): Promise<void>
+
+  /**
+   * Permanently locks payment state to 'UNCERTAIN' (fail-closed) on timeout.
+   */
+  recordUncertain(txHash: Hex, reason: string, leaseToken?: string): Promise<void>
+
+  /**
+   * Retrieves a payment record for audit and testing.
+   */
+  getPayment(txHash: Hex): Promise<PaymentRecord | null>
+
+  /**
+   * Read-only health/readiness ping. Returns true if storage is responsive.
+   */
+  ping(): Promise<boolean>
+
+  /**
+   * Graceful connection close.
+   */
+  close(): Promise<void>
 }
 
 /**

@@ -10,9 +10,9 @@ import {
   buildEip712Domain,
   PAYGATE_EIP712_TYPES,
   type GatewayConfig,
+  type GatewayStore,
   type PaymentChallenge,
 } from './types.ts'
-import { GatewayDb } from './db.ts'
 import { BlockchainVerifier, VerificationError, type RpcClientInterface } from './verifier.ts'
 import { UpstreamError, fetchArcMainnetTelemetry, type UpstreamAdapter } from './upstream.ts'
 
@@ -79,22 +79,28 @@ export class ChallengeRateLimiter {
   }
 }
 
-export function createGatewayServer(opts: {
+export async function createGatewayServer(opts: {
   config: GatewayConfig
-  db: GatewayDb
+  db: GatewayStore
   verifier: BlockchainVerifier
   upstream: UpstreamAdapter
   rpc: RpcClientInterface
-}): Server & { rateLimiter: ChallengeRateLimiter } {
+}): Promise<Server & { rateLimiter: ChallengeRateLimiter }> {
   const { config, db, verifier, upstream, rpc } = opts
   const maxBodySize = config.maxBodySizeBytes ?? 1024 * 1024 // 1 MiB default
   const rateLimiter = new ChallengeRateLimiter(
     config.rateLimitWindowMs ?? 60_000,
     config.maxChallengesPerWindow ?? 60
   )
+  const instanceId =
+    config.instanceId ??
+    ('instanceId' in db && typeof (db as { instanceId?: unknown }).instanceId === 'string'
+      ? (db as { instanceId: string }).instanceId
+      : 'pg402-node')
+  const leaseTtlMs = config.leaseTtlMs ?? 30000
 
   // Conservative startup recovery: recover lingering in-flight states from prior process crashes
-  const recoveryStats = db.recoverStartupStates()
+  const recoveryStats = await db.recoverStartupStates()
   if (recoveryStats.recoveredUncertain > 0 || recoveryStats.recoveredFailed > 0) {
     process.stdout.write(
       `[PayGate402] Startup recovery executed: ${recoveryStats.recoveredUncertain} in-flight dispatch(es) locked to UNCERTAIN, ${recoveryStats.recoveredFailed} pre-dispatch reservation(s) reset to FAILED.\n`
@@ -193,11 +199,26 @@ export function createGatewayServer(opts: {
     try {
       // 1. Health Endpoint
       if (pathname === '/health' || pathname === '/v1/health') {
+        const isHealthy = await db.ping().catch(() => false)
+        if (!isHealthy) {
+          sendJson(res, 503, {
+            status: 'unhealthy',
+            database: 'unreachable',
+            network: config.chainId === 5042 ? 'Arc Mainnet' : 'Arc Testnet',
+            chainId: config.chainId,
+            contract: config.contractAddress,
+            timestamp: Date.now(),
+          })
+          logStructured(method, pathname, 503, Date.now() - startTime, { error: 'Database ping failed' })
+          return
+        }
+
         const chainId = await rpc.getChainId().catch(() => config.chainId)
         const blockNumber = await rpc.getBlockNumber().catch(() => 0n)
         sendJson(res, 200, {
           status: 'healthy',
-          network: 'Arc Testnet',
+          database: 'connected',
+          network: config.chainId === 5042 ? 'Arc Mainnet' : 'Arc Testnet',
           chainId,
           currentBlock: blockNumber.toString(),
           contract: config.contractAddress,
@@ -216,9 +237,38 @@ export function createGatewayServer(opts: {
       // 1B. Mock Fixture Registration Endpoint (Only available when mockRpc is active)
       if (pathname === '/v1/mock/register-payment' && method === 'POST') {
         if (!config.mockRpc && process.env.MOCK_RPC !== 'true') {
-          sendJson(res, 403, { error: 'Mock endpoints disabled when not in mock mode', code: 'MOCK_DISABLED' })
+          sendJson(res, 404, { error: 'Not Found', code: 'NOT_FOUND' })
           return
         }
+
+        const configuredSecret = config.gatewayTestSecret || process.env.GATEWAY_TEST_SECRET
+        const isProduction = process.env.NODE_ENV === 'production' || process.env.PUBLIC_GATEWAY === 'true'
+
+        // Guard against exposing mock registration on public/production deployments without an auth secret
+        if (isProduction && !configuredSecret) {
+          sendJson(res, 403, {
+            error: 'Mock fixture registration is disabled on public deployment without GATEWAY_TEST_SECRET',
+            code: 'MOCK_REGISTRATION_FORBIDDEN',
+          })
+          return
+        }
+
+        // Authenticate when secret is configured
+        if (configuredSecret) {
+          const authHeader = req.headers['authorization']
+          const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined
+          const testSecretHeader = req.headers['x-gateway-test-secret'] as string | undefined
+          const providedSecret = testSecretHeader || bearerToken
+
+          if (!providedSecret || providedSecret !== configuredSecret) {
+            sendJson(res, 401, {
+              error: 'Unauthorized: valid X-Gateway-Test-Secret header required to register mock fixtures',
+              code: 'UNAUTHORIZED_MOCK_ACCESS',
+            })
+            return
+          }
+        }
+
         const bodyStr = await parseRequestBody(req)
         const payload = JSON.parse(bodyStr || '{}') as {
           txHash?: Hex
@@ -296,7 +346,7 @@ export function createGatewayServer(opts: {
           return
         }
 
-        const challenge = db.getChallenge(payload.requestId as Hex)
+        const challenge = await db.getChallenge(payload.requestId as Hex)
         if (!challenge) {
           sendJson(res, 404, {
             error: 'Payment challenge not found for given requestId',
@@ -315,14 +365,21 @@ export function createGatewayServer(opts: {
           currentBodyDigest: challenge.bodyDigest,
         })
 
+        const isSimulated = Boolean(config.mockRpc || process.env.MOCK_RPC === 'true')
         sendJson(res, 200, {
-          status: 'verified',
+          status: isSimulated ? 'simulated' : 'verified',
           serviceId: challenge.serviceId.toString(),
           requestId: challenge.requestId,
           txHash: payload.txHash,
           caller: verification.verifiedCaller,
           amountPaid: verification.amountPaid.toString(),
           blockNumber: verification.blockNumber.toString(),
+          ...(isSimulated
+            ? {
+                simulated: true,
+                notice: 'SIMULATED DEMO — NOT ON-CHAIN AUTHORIZED',
+              }
+            : {}),
         })
         logStructured(method, pathname, 200, Date.now() - startTime, { txHash: payload.txHash })
         return
@@ -409,7 +466,7 @@ export function createGatewayServer(opts: {
             status: 'ISSUED',
           }
 
-          db.createChallenge(challenge)
+          await db.createChallenge(challenge)
 
           const authHeader = `PayGate402 serviceId=${serviceId.toString()}, chainId=${config.chainId}, requestId=${newRequestId}`
           sendJson(
@@ -451,7 +508,7 @@ export function createGatewayServer(opts: {
         }
 
         // 3B. VERIFICATION & CONSUMPTION MODE: Payment headers present
-        const challenge = db.getChallenge(requestId)
+        const challenge = await db.getChallenge(requestId)
         if (!challenge) {
           sendJson(res, 400, {
             error: 'Specified requestId was not found or was not generated by this gateway',
@@ -461,28 +518,93 @@ export function createGatewayServer(opts: {
           return
         }
 
-        // Attempt Atomic Payment Lock in SQLite
-        const lockResult = db.tryAcquirePaymentLock({
+        // Attempt Atomic Payment Lock in Store
+        const lockResult = await db.tryAcquirePaymentLock({
           txHash,
           requestId,
           serviceId,
           caller: payerHeader ? (payerHeader.toLowerCase() as Address) : '0x0000000000000000000000000000000000000000',
           amountPaid: challenge.quotedPrice,
+          leaseOwner: instanceId,
+          leaseTtlMs,
         })
 
         if (!lockResult.acquired) {
           if (lockResult.reason === 'ALREADY_SUCCEEDED') {
+            if (challenge.serviceId !== serviceId) {
+              sendJson(res, 400, {
+                error: `Route serviceId (${serviceId.toString()}) does not match challenge serviceId (${challenge.serviceId.toString()})`,
+                code: 'SERVICE_ID_MISMATCH',
+              })
+              logStructured(method, pathname, 400, Date.now() - startTime, {
+                error: 'Service ID mismatch on retry',
+                routeServiceId: serviceId.toString(),
+                challengeServiceId: challenge.serviceId.toString(),
+                txHash,
+                requestId,
+              })
+              return
+            }
+
+            const expectedCaller = lockResult.caller
+            if (!expectedCaller) {
+              sendJson(res, 500, {
+                error: 'Corrupted payment record: missing caller address',
+                code: 'INTERNAL_ERROR',
+              })
+              logStructured(method, pathname, 500, Date.now() - startTime, { txHash, requestId })
+              return
+            }
+
+            // Verify EIP-712 authorization and request binding for cached retry
+            try {
+              await verifier.verifyRetryAuthorization({
+                txHash,
+                challenge,
+                signature,
+                expectedCaller,
+                currentPath: subPath,
+                currentMethod: method,
+                currentBodyDigest: bodyDigest,
+                currentServiceId: serviceId,
+              })
+            } catch (err: unknown) {
+              if (err instanceof VerificationError) {
+                sendJson(res, err.statusCode, { error: err.message, code: err.code })
+                logStructured(method, pathname, err.statusCode, Date.now() - startTime, {
+                  error: err.message,
+                  code: err.code,
+                  txHash,
+                  requestId,
+                })
+                return
+              }
+              const msg = err instanceof Error ? err.message : String(err)
+              sendJson(res, 401, { error: `Authorization verification failed: ${msg}`, code: 'INVALID_SIGNATURE' })
+              logStructured(method, pathname, 401, Date.now() - startTime, { error: msg, txHash, requestId })
+              return
+            }
+
             // Legitimate idempotent retry: return cached response
             const cachedBody = lockResult.cachedResponse || '{}'
+            const isSimulated = Boolean(config.mockRpc || process.env.MOCK_RPC === 'true')
+            const statusHeader = isSimulated ? 'SIMULATED_MOCK_CACHED' : 'VERIFIED_ONCHAIN_CACHED'
+
             sendJson(
               res,
               200,
               JSON.parse(cachedBody),
               {
-                'X-PayGate-Status': 'VERIFIED_ONCHAIN_CACHED',
+                'X-PayGate-Status': statusHeader,
                 'X-PayGate-Cached': 'true',
                 'X-PayGate-TxHash': txHash,
                 'X-PayGate-RequestId': requestId,
+                ...(isSimulated
+                  ? {
+                      'X-PayGate-Simulation': 'true',
+                      'X-PayGate-Notice': 'SIMULATED DEMO -- NOT ON-CHAIN AUTHORIZED',
+                    }
+                  : {}),
               }
             )
             logStructured(method, pathname, 200, Date.now() - startTime, {
@@ -519,8 +641,22 @@ export function createGatewayServer(opts: {
           return
         }
 
+        const leaseToken = lockResult.leaseToken
+
         // Lock Acquired -> Move to VERIFYING state
-        db.transitionState(txHash, 'RESERVED', 'VERIFYING')
+        const transitionedToVerifying = await db.transitionState(txHash, 'RESERVED', 'VERIFYING', leaseToken)
+        if (!transitionedToVerifying) {
+          sendJson(res, 409, {
+            error: 'Payment transaction state conflict. Unable to transition from RESERVED to VERIFYING.',
+            code: 'CONCURRENT_REQUEST_CONFLICT',
+          })
+          logStructured(method, pathname, 409, Date.now() - startTime, {
+            error: 'Failed to transition to VERIFYING',
+            txHash,
+            requestId,
+          })
+          return
+        }
 
         let verificationResult
         try {
@@ -534,7 +670,7 @@ export function createGatewayServer(opts: {
           })
         } catch (err: unknown) {
           if (err instanceof VerificationError) {
-            db.recordFailed(txHash, err.message)
+            await db.recordFailed(txHash, err.message, leaseToken)
             sendJson(res, err.statusCode, { error: err.message, code: err.code })
             logStructured(method, pathname, err.statusCode, Date.now() - startTime, {
               error: err.message,
@@ -545,14 +681,26 @@ export function createGatewayServer(opts: {
           }
           // Unexpected RPC error
           const msg = err instanceof Error ? err.message : String(err)
-          db.recordFailed(txHash, msg)
+          await db.recordFailed(txHash, msg, leaseToken)
           sendJson(res, 503, { error: `Blockchain RPC failure: ${msg}`, code: 'RPC_UNAVAILABLE' })
           logStructured(method, pathname, 503, Date.now() - startTime, { error: msg, txHash })
           return
         }
 
         // Verification Passed -> Move to DISPATCHING state
-        db.transitionState(txHash, 'VERIFYING', 'DISPATCHING')
+        const transitionedToDispatching = await db.transitionState(txHash, 'VERIFYING', 'DISPATCHING', leaseToken)
+        if (!transitionedToDispatching) {
+          sendJson(res, 409, {
+            error: 'Payment transaction state conflict. Unable to transition from VERIFYING to DISPATCHING.',
+            code: 'CONCURRENT_REQUEST_CONFLICT',
+          })
+          logStructured(method, pathname, 409, Date.now() - startTime, {
+            error: 'Failed to transition to DISPATCHING',
+            txHash,
+            requestId,
+          })
+          return
+        }
 
         let upstreamRes
         try {
@@ -567,7 +715,7 @@ export function createGatewayServer(opts: {
           if (err instanceof UpstreamError) {
             if (err.isTimeoutAfterDispatch) {
               // Upstream timeout after execution started: lock state to UNCERTAIN (fail closed)
-              db.recordUncertain(txHash, err.message)
+              await db.recordUncertain(txHash, err.message, leaseToken)
               sendJson(res, 504, {
                 error: 'Upstream timed out after dispatch commenced. Payment locked to UNCERTAIN to prevent duplicate operations.',
                 code: 'UPSTREAM_TIMEOUT_UNCERTAIN',
@@ -577,7 +725,7 @@ export function createGatewayServer(opts: {
             }
 
             // Connection failed before execution: mark FAILED (retriable)
-            db.recordFailed(txHash, err.message)
+            await db.recordFailed(txHash, err.message, leaseToken)
             sendJson(res, 502, {
               error: `Upstream dispatch error: ${err.message}`,
               code: 'UPSTREAM_DISPATCH_FAILED',
@@ -587,15 +735,25 @@ export function createGatewayServer(opts: {
           }
 
           const msg = err instanceof Error ? err.message : String(err)
-          db.recordUncertain(txHash, msg)
+          await db.recordUncertain(txHash, msg, leaseToken)
           sendJson(res, 500, { error: `Internal execution error: ${msg}`, code: 'INTERNAL_ERROR' })
           logStructured(method, pathname, 500, Date.now() - startTime, { error: msg })
           return
         }
 
         // Upstream Succeeded -> Record SUCCEEDED, cache payload, consume challenge
-        db.recordSuccess(txHash, upstreamRes.body, verificationResult.verifiedCaller)
-        db.markChallengeConsumed(requestId)
+        try {
+          await db.recordSuccess(txHash, upstreamRes.body, verificationResult.verifiedCaller, leaseToken)
+          await db.markChallengeConsumed(requestId)
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err)
+          sendJson(res, 500, {
+            error: `Failed to commit payment success: ${msg}`,
+            code: 'STATE_RECORD_FAILED',
+          })
+          logStructured(method, pathname, 500, Date.now() - startTime, { error: msg, txHash, requestId })
+          return
+        }
 
         // Return verified response to client
         let parsedBody: unknown
@@ -605,17 +763,26 @@ export function createGatewayServer(opts: {
           parsedBody = upstreamRes.body
         }
 
+        const isSimulated = Boolean(config.mockRpc || process.env.MOCK_RPC === 'true')
+        const statusHeader = isSimulated ? 'SIMULATED_MOCK_SUCCESS' : 'VERIFIED_ONCHAIN_SUCCESS'
+
         sendJson(
           res,
           upstreamRes.status,
           parsedBody,
           {
-            'X-PayGate-Status': 'VERIFIED_ONCHAIN_SUCCESS',
+            'X-PayGate-Status': statusHeader,
             'X-PayGate-TxHash': txHash,
             'X-PayGate-RequestId': requestId,
             'X-PayGate-Caller': verificationResult.verifiedCaller,
             'X-PayGate-Amount-Paid': verificationResult.amountPaid.toString(),
             'X-PayGate-Block-Number': verificationResult.blockNumber.toString(),
+            ...(isSimulated
+              ? {
+                  'X-PayGate-Simulation': 'true',
+                  'X-PayGate-Notice': 'SIMULATED DEMO -- NOT ON-CHAIN AUTHORIZED',
+                }
+              : {}),
             ...(upstreamRes.headers || {}),
           }
         )
